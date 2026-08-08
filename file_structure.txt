@@ -1,0 +1,17 @@
+MORL_LA/
+├── env/
+│   ├── __init__.py
+│   └── simple_la.py          # Appendix B simplified env (먼저)
+├── algorithms/
+│   ├── dqn.py                # behavioral policy (online)
+│   ├── bcq.py
+│   ├── cql.py
+│   └── dt.py
+├── data_collection/
+│   └── collect.py            # π_b로 trajectory 수집 → datasets/
+├── datasets/                 # .npz / .pt / replay buffer
+├── configs/                  # Appendix A hyperparams (추천)
+├── utils/                    # RTG, metrics 등 (선택)
+├── train_online.py           # DQN 학습 (추천)
+├── train_offline.py
+└── eval.py                   # throughput / BLER / SE (나중)
