@@ -1,0 +1,8 @@
+# Appendix B toy LA — data collection / DP defaults
+beta: 0.5
+gamma_dp: 0.99
+num_steps: 10000
+num_episodes: 1
+seed: 0
+epsilons: [0.0, 0.25, 0.5]
+out_dir: datasets
