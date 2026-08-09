@@ -1,0 +1,28 @@
+{
+  "method": "mopo_vanilla",
+  "uncertainty_mode": "vanilla",
+  "dataset": "C:\\Users\\pstar\\Documents\\GitHub\\MORL_LA\\datasets\\la_dp_eps0_steps10000_ep1_seed0.npz",
+  "epsilon": 0.0,
+  "seed": 0,
+  "beta": 0.5,
+  "reward_scale": 5.495217,
+  "penalty_coef": 1.0,
+  "u_scale_van": 1.3455686569213867,
+  "u_scale_orc": 2.394026279449463,
+  "u_scale_resid": 0.33720022439956665,
+  "alpha_orc": 0.46257353089802083,
+  "use_ep_fallback": false,
+  "corr_van_orc": 0.7281709909939367,
+  "dynamics_steps": 1000,
+  "policy_steps": 3000,
+  "eval_max_steps": 1000,
+  "eval_episodes": 1,
+  "final_return": -1496.313162407702,
+  "eval_steps": [
+    3000
+  ],
+  "eval_rewards": [
+    -1496.313162407702
+  ],
+  "dataset_mean_return": 12654.93471053208
+}

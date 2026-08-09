@@ -1,8 +1,16 @@
-# Appendix B toy LA — data collection / DP defaults
+# Appendix A toy LA — vanilla vs oracle(debias)
 beta: 0.5
+reward_scale: 5.495217
 gamma_dp: 0.99
 num_steps: 10000
 num_episodes: 1
 seed: 0
-epsilons: [0.0, 0.25, 0.5]
+epsilons: [0.0]
 out_dir: datasets
+mopo_penalty_coef: 20.0
+# oracle = strip ACK aleatoric from penalty (NOT oracle_p which adds it)
+mopo_modes: [vanilla, oracle]
+mopo_dynamics_steps: 1000
+mopo_policy_steps: 3000
+mopo_eval_max_steps: 1000
+mopo_rollout_batch_size: 1000

@@ -1,0 +1,22 @@
+{
+  "method": "mopo_vanilla",
+  "uncertainty_mode": "vanilla",
+  "dataset": "C:\\Users\\pstar\\Documents\\GitHub\\MORL_LA\\datasets\\la_dp_eps0.25_steps10000_ep1_seed0.npz",
+  "epsilon": 0.25,
+  "seed": 0,
+  "beta": 0.5,
+  "reward_scale": 5.495217,
+  "penalty_coef": 1.0,
+  "dynamics_steps": 50,
+  "policy_steps": 100,
+  "eval_max_steps": 200,
+  "eval_episodes": 1,
+  "final_return": -289.610315278136,
+  "eval_steps": [
+    100
+  ],
+  "eval_rewards": [
+    -289.610315278136
+  ],
+  "dataset_mean_return": 10481.667177559115
+}

@@ -31,6 +31,8 @@ N_ACTIONS = 28        # MCS 비슷한 이산 action 개수; 논문에서는 a = 
 CONTEXT_HIGH = 500    # 채널 context x ∈ {0,...,499}; 클수록 채널 좋음
 SCALE_ACTION = 18.0   # 성공확률 식 p=tanh(x/(18*a)) 의 18
 DEFAULT_BETA = 0.5    # 실패 패널티 스케일 β (논문이 고정값을 안 줌 → 조절 가능)
+# Appendix A Table A.1 greedy ≈12306; with β=0.5 / 10k steps unscaled ≈2239 → scale≈5.5
+DEFAULT_REWARD_SCALE = 5.495217
 DEFAULT_MAX_STEPS = 10_000  # 에피소드 길이 상한 (자연 종료 없는 continuous 태스크)
 
 
@@ -50,6 +52,7 @@ class LAEnv(gym.Env):
         n_actions: int = N_ACTIONS,            # MCS 선택지 개수
         context_high: int = CONTEXT_HIGH,      # context 상한 (exclusive): 0..high-1
         beta: float = DEFAULT_BETA,            # 실패 reward 가중치 −β(k+1)
+        reward_scale: float = DEFAULT_REWARD_SCALE,  # 전체 reward 배율 (정책 invariant)
         max_episode_steps: int = DEFAULT_MAX_STEPS,  # 이 스텝 지나면 truncated=True
         include_context: bool = True,          # True: obs에 채널 x 포함 / False: k만 (부분관측)
         normalize_obs: bool = False,           # True: obs를 대략 [0,1]로 나눔
@@ -64,12 +67,15 @@ class LAEnv(gym.Env):
             raise ValueError("n_actions must be >= 1")
         if context_high < 1:
             raise ValueError("context_high must be >= 1")
+        if reward_scale <= 0:
+            raise ValueError("reward_scale must be > 0")
 
         # ----- 설정 저장 -----
         self.n_states = int(n_states)                    # k 범위: 0 .. n_states-1
         self.n_actions = int(n_actions)                  # gym action: 0 .. n_actions-1
         self.context_high = int(context_high)            # x 범위: 0 .. context_high-1
         self.beta = float(beta)                          # 실패 패널티 계수
+        self.reward_scale = float(reward_scale)          # return 스케일 (DP argmax 불변)
         self.max_episode_steps = int(max_episode_steps)  # truncate 기준
         self.include_context = bool(include_context)     # 관측에 x를 넣을지
         self.normalize_obs = bool(normalize_obs)         # 관측 정규화 여부
@@ -118,6 +124,26 @@ class LAEnv(gym.Env):
         # tanh: 결과를 (0,1) 근처로 부드럽게 눌러 확률처럼 씀
         return float(np.tanh(context / (SCALE_ACTION * action)))
 
+    @staticmethod
+    def aleatoric_uncertainty(context: int, action: int) -> float:
+        """
+        Oracle aleatoric uncertainty from ACK/NACK Bernoulli:
+          u = p (1 - p),  p = success_probability(x, a)
+        """
+        p = LAEnv.success_probability(context, action)
+        return float(p * (1.0 - p))
+
+    @classmethod
+    def oracle_uncertainty(
+        cls, context: int, action: int
+    ) -> tuple[float, float]:
+        """
+        Returns (p_success, bernoulli_variance p(1-p)) for paper action a.
+        Used by MOPO oracle / debias penalty modes.
+        """
+        p = cls.success_probability(context, action)
+        return float(p), float(p * (1.0 - p))
+
     def reward(self, state: int, action: int, success: bool) -> float:
         """
         논문 식 (4):
@@ -126,9 +152,9 @@ class LAEnv(gym.Env):
         """
         if success:
             # a/n_actions ∈ (0,1], tanh로 약간 압축
-            return float(np.tanh(action / self.n_actions))
+            return float(self.reward_scale * np.tanh(action / self.n_actions))
         # state=k (0-based), (k+1) = "몇 번째 시도였는지" 1-based 카운트
-        return float(-self.beta * (state + 1))
+        return float(self.reward_scale * (-self.beta * (state + 1)))
 
     def next_state(self, state: int, success: bool) -> int:
         """

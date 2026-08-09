@@ -1,0 +1,22 @@
+{
+  "method": "mopo_oracle_p",
+  "uncertainty_mode": "oracle_p",
+  "dataset": "C:\\Users\\pstar\\Documents\\GitHub\\MORL_LA\\datasets\\la_dp_eps0_steps10000_ep1_seed0.npz",
+  "epsilon": 0.0,
+  "seed": 0,
+  "beta": 0.5,
+  "reward_scale": 5.495217,
+  "penalty_coef": 1.0,
+  "dynamics_steps": 2000,
+  "policy_steps": 10000,
+  "eval_max_steps": 10000,
+  "eval_episodes": 1,
+  "final_return": 12179.383752541182,
+  "eval_steps": [
+    10000
+  ],
+  "eval_rewards": [
+    12179.383752541182
+  ],
+  "dataset_mean_return": 12654.93471053208
+}

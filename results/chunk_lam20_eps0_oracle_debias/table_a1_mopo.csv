@@ -1,0 +1,4 @@
+method,uncertainty_mode,epsilon,seed,final_return,beta,reward_scale,eval_max_steps,dataset,penalty_coef
+greedy,,0.0,0,1290.9747418591105,0.5,5.495217,1000,,
+mopo_vanilla,vanilla,0.0,0,811.3054996608306,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0_steps10000_ep1_seed0.npz,20.0
+mopo_oracle,oracle,0.0,0,-1570.7839963195922,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0_steps10000_ep1_seed0.npz,20.0

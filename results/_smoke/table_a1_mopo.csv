@@ -1,0 +1,6 @@
+method,uncertainty_mode,epsilon,seed,final_return,beta,reward_scale,eval_max_steps,dataset
+greedy,,0.25,0,180.90525247101849,0.5,5.495217,200,
+mopo_vanilla,vanilla,0.25,0,-289.610315278136,0.5,5.495217,200,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz
+mopo_epistemic,epistemic,0.25,0,-289.610315278136,0.5,5.495217,200,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz
+mopo_oracle_p,oracle_p,0.25,0,-289.610315278136,0.5,5.495217,200,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz
+mopo_debias,debias,0.25,0,-289.610315278136,0.5,5.495217,200,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz

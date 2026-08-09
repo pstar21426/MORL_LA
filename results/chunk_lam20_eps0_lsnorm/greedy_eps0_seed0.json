@@ -1,0 +1,11 @@
+{
+  "method": "greedy",
+  "uncertainty_mode": null,
+  "epsilon": 0.0,
+  "seed": 0,
+  "final_return": 1290.9747418591105,
+  "beta": 0.5,
+  "reward_scale": 5.495217,
+  "eval_max_steps": 1000,
+  "greedy_epsilon": 0.0
+}

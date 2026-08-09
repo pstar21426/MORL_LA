@@ -1,0 +1,16 @@
+method,uncertainty_mode,epsilon,seed,final_return,beta,reward_scale,eval_max_steps,dataset
+greedy,,0.0,0,12654.93471053208,0.5,5.495217,10000,
+greedy,,0.25,0,10481.667177559115,0.5,5.495217,10000,
+greedy,,0.5,0,7523.211657022136,0.5,5.495217,10000,
+mopo_vanilla,vanilla,0.0,0,11428.343320754231,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0_steps10000_ep1_seed0.npz
+mopo_vanilla,vanilla,0.25,0,10668.90471908401,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz
+mopo_vanilla,vanilla,0.5,0,9550.09046012084,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.5_steps10000_ep1_seed0.npz
+mopo_epistemic,epistemic,0.0,0,11510.833376513752,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0_steps10000_ep1_seed0.npz
+mopo_epistemic,epistemic,0.25,0,9610.989811072835,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz
+mopo_epistemic,epistemic,0.5,0,11626.28113753418,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.5_steps10000_ep1_seed0.npz
+mopo_oracle_p,oracle_p,0.0,0,12179.383752541182,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0_steps10000_ep1_seed0.npz
+mopo_oracle_p,oracle_p,0.25,0,11850.91195633586,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz
+mopo_oracle_p,oracle_p,0.5,0,11600.276356381311,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.5_steps10000_ep1_seed0.npz
+mopo_debias,debias,0.0,0,9658.4490888214,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0_steps10000_ep1_seed0.npz
+mopo_debias,debias,0.25,0,10768.739030877665,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz
+mopo_debias,debias,0.5,0,8518.871324757976,0.5,5.495217,10000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.5_steps10000_ep1_seed0.npz

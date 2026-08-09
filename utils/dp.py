@@ -15,6 +15,7 @@ import numpy as np
 from env.la_env import (
     CONTEXT_HIGH,
     DEFAULT_BETA,
+    DEFAULT_REWARD_SCALE,
     N_ACTIONS,
     N_STATES,
     SCALE_ACTION,
@@ -44,14 +45,15 @@ def _expected_backup(
     n_states: int,
     n_actions: int,
     context_high: int,
+    reward_scale: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     한 번의 Bellman backup.
 
     Q(k, x, a) = p * (r_ok + γ V̄(0)) + (1-p) * (r_fail + γ V̄(k'))
       p = tanh(x / (18 * a))
-      r_ok = tanh(a / n_actions)
-      r_fail = -β (k + 1)
+      r_ok = scale * tanh(a / n_actions)
+      r_fail = scale * (-β (k + 1))
       k' = 0 if k == n_states-1 else k+1
     V̄(k) = mean_x max_a Q(k, x, a)
     """
@@ -62,13 +64,13 @@ def _expected_backup(
     # p[x, a_idx] = tanh(x / (18 * a))
     # x[:, None] / (18 * a[None, :]) → (X, A)
     p = np.tanh(contexts[:, None] / (SCALE_ACTION * actions[None, :]))  # (X, A)
-    r_ok = np.tanh(actions / n_actions)  # (A,)
+    r_ok = reward_scale * np.tanh(actions / n_actions)  # (A,)
     # broadcast: (X, A)
     r_ok_mat = np.broadcast_to(r_ok, p.shape)
 
     q_new = np.empty_like(q)
     for k in range(n_states):
-        r_fail = -beta * (k + 1)
+        r_fail = reward_scale * (-beta * (k + 1))
         k_fail = 0 if k >= n_states - 1 else k + 1
         # Q(k, x, a) over all x, a
         q_new[k] = (
@@ -87,6 +89,7 @@ def value_iteration(
     n_actions: int = N_ACTIONS,
     context_high: int = CONTEXT_HIGH,
     beta: float = DEFAULT_BETA,
+    reward_scale: float = DEFAULT_REWARD_SCALE,
     gamma: float = 0.99,
     tol: float = 1e-6,
     max_iters: int = 10_000,
@@ -126,6 +129,7 @@ def value_iteration(
             n_states=n_states,
             n_actions=n_actions,
             context_high=context_high,
+            reward_scale=reward_scale,
         )
         max_delta = float(np.max(np.abs(q_new - q)))
         q = q_new
@@ -204,6 +208,7 @@ def solve_la_dp(
             n_actions=N_ACTIONS,
             context_high=CONTEXT_HIGH,
             beta=DEFAULT_BETA,
+            reward_scale=DEFAULT_REWARD_SCALE,
         )
     else:
         kwargs = dict(
@@ -211,6 +216,7 @@ def solve_la_dp(
             n_actions=env.n_actions,
             context_high=env.context_high,
             beta=env.beta,
+            reward_scale=getattr(env, "reward_scale", DEFAULT_REWARD_SCALE),
         )
 
     sol = value_iteration(gamma=gamma, tol=tol, max_iters=max_iters, **kwargs)

@@ -28,6 +28,7 @@ class CollectConfig:
     num_episodes: int = 1
     gamma_dp: float = 0.99  # DP value iteration discount
     beta: float = 0.5
+    reward_scale: float = 5.495217  # scale returns toward Appendix A Table A.1
     seed: int = 0
     include_context: bool = True
     out_dir: str = "datasets"
@@ -235,6 +236,7 @@ def collect_dataset(
 
     env = make_la_env(
         beta=cfg.beta,
+        reward_scale=cfg.reward_scale,
         max_episode_steps=cfg.num_steps,
         include_context=cfg.include_context,
         seed=cfg.seed,
@@ -265,6 +267,7 @@ def collect_dataset(
         "num_episodes": cfg.num_episodes,
         "gamma_dp": cfg.gamma_dp,
         "beta": cfg.beta,
+        "reward_scale": cfg.reward_scale,
         "seed": cfg.seed,
         "include_context": cfg.include_context,
         "n_states": env.n_states,
@@ -288,6 +291,7 @@ def collect_epsilon_grid(
     num_episodes: int = 1,
     seed: int = 0,
     beta: float = 0.5,
+    reward_scale: float = 5.495217,
     gamma_dp: float = 0.99,
     out_dir: str = "datasets",
 ) -> List[Dict[str, Any]]:
@@ -295,7 +299,12 @@ def collect_epsilon_grid(
     ε ∈ {0, 0.25, 0.5} 데이터셋을 한 번에 수집.
     DP는 한 번만 풀고 policy를 재사용한다.
     """
-    env = make_la_env(beta=beta, max_episode_steps=num_steps, seed=seed)
+    env = make_la_env(
+        beta=beta,
+        reward_scale=reward_scale,
+        max_episode_steps=num_steps,
+        seed=seed,
+    )
     _, policy = solve_la_dp(env, gamma=gamma_dp)
 
     results: List[Dict[str, Any]] = []
@@ -306,6 +315,7 @@ def collect_epsilon_grid(
             num_episodes=num_episodes,
             seed=seed,
             beta=beta,
+            reward_scale=reward_scale,
             gamma_dp=gamma_dp,
             out_dir=out_dir,
         )
@@ -326,6 +336,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--num-episodes", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--beta", type=float, default=0.5)
+    p.add_argument("--reward-scale", type=float, default=5.495217)
     p.add_argument("--gamma-dp", type=float, default=0.99)
     p.add_argument("--out-dir", type=str, default="datasets")
     return p
@@ -341,6 +352,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             num_episodes=args.num_episodes,
             seed=args.seed,
             beta=args.beta,
+            reward_scale=args.reward_scale,
             gamma_dp=args.gamma_dp,
             out_dir=args.out_dir,
         )
@@ -356,6 +368,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             num_episodes=args.num_episodes,
             seed=args.seed,
             beta=args.beta,
+            reward_scale=args.reward_scale,
             gamma_dp=args.gamma_dp,
             out_dir=args.out_dir,
         )
