@@ -1,0 +1,10 @@
+method,uncertainty_mode,epsilon,seed,final_return,beta,reward_scale,eval_max_steps,dataset,penalty_coef
+greedy,,0.25,0,1290.9747418591105,0.5,5.495217,1000,,
+mopo_vanilla,vanilla,0.25,0,1031.9281789936483,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz,1.0
+mopo_vanilla,vanilla,0.25,0,1233.096186811529,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz,5.0
+mopo_vanilla,vanilla,0.25,0,1299.3300010787377,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz,10.0
+mopo_vanilla,vanilla,0.25,0,1292.1312240187026,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz,20.0
+mopo_epistemic,epistemic,0.25,0,1039.053525408542,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz,1.0
+mopo_epistemic,epistemic,0.25,0,1294.9330130056194,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz,5.0
+mopo_epistemic,epistemic,0.25,0,1310.8364185863104,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz,10.0
+mopo_epistemic,epistemic,0.25,0,1310.8953635091193,0.5,5.495217,1000,C:\Users\pstar\Documents\GitHub\MORL_LA\datasets\la_dp_eps0.25_steps10000_ep1_seed0.npz,20.0

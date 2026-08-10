@@ -1,18 +1,108 @@
 MORL_LA/
 ├── env/
 │   ├── __init__.py
-│   └── la_env.py             # Appendix B simplified env
-├── algorithms/
-│   ├── dqn.py                # behavioral policy (online; 메인 논문용)
-│   ├── bcq.py
-│   └── cql.py
-├── data_collection/
-│   └── collect.py            # DP greedy(+ε) → datasets/ (BCQ/CQL용)
-├── datasets/                 # .npz offline buffers
-├── configs/
-│   └── appendix_b.yaml        # toy LA collect/DP defaults
+│   └── la_env.py                 # Appendix A/B toy LA Gym env (k, x, MCS a)
 ├── utils/
-│   └── dp.py                 # Appendix B: value iteration → π* (greedy)
-├── train_online.py           # DQN 학습 (메인 논문용)
-├── train_offline.py          # BCQ / CQL
-└── eval.py
+│   ├── __init__.py
+│   └── dp.py                     # value iteration → DP greedy π*
+├── data_collection/
+│   ├── __init__.py
+│   └── collect.py                # DP greedy(+ε) → datasets/*.npz
+├── algorithms/
+│   └── my_MOPO.py                 # MOPO: ensemble dynamics + SAC + uncertainty modes
+├── experiments/
+│   ├── __init__.py
+│   └── run_appendix_mopo.py      # Greedy / MOPO grid, λ sweep, table_a1_*.md/csv
+├── scripts/
+│   ├── calibrate_beta.py         # reward_scale so greedy≈Table A.1
+│   └── plot_rollout_scatter.py   # DP vs vanilla vs epistemic scatter
+├── configs/
+│   └── appendix_b.yaml            # collect / MOPO default knobs
+├── datasets/                     # offline buffers (INPUT to MOPO)
+│   ├── la_dp_eps{0,0.25,0.5}_steps10000_ep1_seed0.npz
+│   └── _smoke/                   # tiny collect smoke tests
+├── results/                      # experiment outputs (JSON / tables / plots)
+│   ├── lambda_sweep_norm_eps0/   # main λ sweep (unit-mean penalty norm)
+│   │   ├── greedy_*.json
+│   │   ├── mopo_{vanilla,epistemic}_*_lam{1,5,10,20}.json
+│   │   ├── table_a1_mopo.md|.csv
+│   │   └── scatter/              # rollouts_*.npz + scatter_*.png
+│   ├── chunk_*/                  # older ablation chunks
+│   └── _smoke/
+├── train_offline.py              # placeholder (BCQ/CQL not implemented yet)
+└── file_structure.txt            # this file
+
+
+==============================================================================
+HOW A RUN PROGRESSES (typical path)
+==============================================================================
+
+(0) One-time: calibrate reward scale (optional)
+    python scripts/calibrate_beta.py
+    → prints reward_scale used so 10k-step greedy ≈ paper Table A.1 (~12306)
+    → no dataset written; value is baked into collect defaults / configs
+
+(1) Collect offline DP data
+    python -m data_collection.collect --epsilon 0.0 --num-steps 10000 --seed 0
+    READS:  env/la_env.py, utils/dp.py
+    WRITES: datasets/la_dp_eps0_steps10000_ep1_seed0.npz
+            keys: observations, actions, rewards, next_observations,
+                  terminations, meta_json (beta, reward_scale, epsilon, …)
+    Same for eps=0.25 / 0.5 if needed.
+
+(2) Train + eval MOPO (main experiment)
+    python -m experiments.run_appendix_mopo --fast \
+      --modes vanilla epistemic --epsilons 0.0 --seeds 0 \
+      --penalty-coefs 1 5 10 20 --greedy-epsilon 0.0 \
+      --results-dir results/lambda_sweep_norm_eps0
+
+    READS:  datasets/la_dp_eps0_*.npz
+            algorithms/my_MOPO.py (train_mopo)
+    DOES (per mode × λ):
+      a. load NPZ → real ReplayBuffer, normalize states
+      b. train ensemble dynamics on real data
+      c. calibrate_penalty_scales → unit-mean u (print [penalty-norm] …)
+      d. SAC policy loop:
+           every rollout_interval: model rollout with r̃ = r − λu → model_buffer
+           mixed batch (real_ratio) → SAC update
+      e. eval on real env → final_return
+    WRITES under --results-dir:
+      greedy_eps{ε}_seed{s}.json
+      mopo_{mode}_eps{ε}_seed{s}_lam{λ}.json   # return + hyperparams + calib
+      table_a1_mopo.md / table_a1_mopo.csv      # aggregated table
+
+    Uncertainty modes in my_MOPO.py:
+      vanilla   — max ensemble reward variance (ACK noise mixed in)
+      epistemic — std of ensemble mean rewards
+      oracle    — LS residual van − α·oracle_aleatoric (or ep fallback)
+      oracle_p  — ablation: penalty = oracle aleatoric only
+      debias    — alias of oracle
+
+(3) Scatter: DP vs rollouts (same hyperparams as λ sweep)
+    python scripts/plot_rollout_scatter.py
+      # or --skip-train to only replot from existing NPZs
+    READS:  same dataset + mirrors train_mopo rollout collection
+    WRITES: results/lambda_sweep_norm_eps0/scatter/
+      rollouts_{mode}_lam{λ}_seed{s}.npz   # real_* + roll_* (+ step, u, penalty)
+      scatter_{mode}_lam{λ}_seed{s}.png      # DP vs one mode
+      penalty_{mode}_lam{λ}_seed{s}.png      # rollout colored by λu
+      scatter_combined_lam{λ}_seed{s}.png    # blue=DP, green=vanilla, orange=epistemic
+    Default plot filter: rollout step >= 3000 (final policy batch only, n=1000 per mode)
+
+==============================================================================
+FILE ROLES (quick)
+==============================================================================
+
+  env/la_env.py              dynamics + reward of toy LA
+  utils/dp.py                optimal greedy baseline policy
+  data_collection/collect.py builds offline dataset from DP(+ε)
+  algorithms/my_MOPO.py      all MOPO training / uncertainty / eval
+  experiments/run_appendix_mopo.py  multi-run orchestrator + tables
+  scripts/plot_rollout_scatter.py   visualization of real vs synthetic
+  scripts/calibrate_beta.py  match paper greedy return scale
+  configs/appendix_b.yaml    documented defaults (CLI overrides win)
+  datasets/*.npz          INPUT offline data
+  results/**                 OUTPUT metrics / plots (safe to delete & rerun)
+
+Not implemented yet (planned in older layout): bcq.py, cql.py, dqn.py,
+train_online.py, eval.py — train_offline.py is an empty stub.

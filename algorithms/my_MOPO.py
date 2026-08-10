@@ -463,19 +463,24 @@ def rollout_model(
     u_scale_resid: float = 1.0,
     alpha_orc: float = 1.0,
     use_ep_fallback: bool = False,
+    return_diagnostics: bool = False,
 ):
-    """Generate synthetic transitions in the learned model with uncertainty penalty."""
+    """Generate synthetic transitions in the learned model with uncertainty penalty.
+
+    If return_diagnostics=True, also returns a dict with raw reward, u, and penalty.
+    """
     states = init_states
     batch_size = states.shape[0]
 
     all_s, all_a, all_r, all_ns, all_done = [], [], [], [], []
+    all_r_raw, all_u, all_pen = [], [], []
 
     for _ in range(horizon):
         actions_cont = policy.get_action_tensor(states)
         actions = continuous_to_discrete_torch(actions_cont, max_action)
 
         delta_s, reward, _ = ensemble.predict_one(states, actions, sample=True)
-        penalty = penalty_coef * ensemble.uncertainty(
+        u = ensemble.uncertainty(
             states,
             actions,
             mode=uncertainty_mode,
@@ -490,6 +495,7 @@ def rollout_model(
             alpha_orc=alpha_orc,
             use_ep_fallback=use_ep_fallback,
         )
+        penalty = penalty_coef * u
         penalized_reward = reward - penalty
         next_states = states + delta_s
 
@@ -498,16 +504,28 @@ def rollout_model(
         all_r.append(penalized_reward.cpu().numpy())
         all_ns.append(next_states.cpu().numpy())
         all_done.append(np.zeros((batch_size, 1), dtype=np.float32))
+        if return_diagnostics:
+            all_r_raw.append(reward.cpu().numpy())
+            all_u.append(u.cpu().numpy())
+            all_pen.append(penalty.cpu().numpy())
 
         states = next_states
 
-    return (
+    out = (
         np.concatenate(all_s, axis=0),
         np.concatenate(all_a, axis=0),
         np.concatenate(all_r, axis=0),
         np.concatenate(all_ns, axis=0),
         np.concatenate(all_done, axis=0),
     )
+    if not return_diagnostics:
+        return out
+    diag = {
+        "reward_raw": np.concatenate(all_r_raw, axis=0),
+        "u": np.concatenate(all_u, axis=0),
+        "penalty": np.concatenate(all_pen, axis=0),
+    }
+    return (*out, diag)
 
 
 class SquashedGaussianActor(nn.Module):
