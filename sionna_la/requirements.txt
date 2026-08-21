@@ -1,0 +1,9 @@
+# sionna_la — standalone 5G DL Link Adaptation (Sionna SYS)
+# Activate: conda activate sionna_la
+# Run:      python run_la_sim.py
+
+torch>=2.9.1
+sionna-no-rt>=2.0.1
+matplotlib>=3.8
+numpy>=2.0
+pyyaml>=6.0
