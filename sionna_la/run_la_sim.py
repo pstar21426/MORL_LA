@@ -1,29 +1,17 @@
-"""
-5G downlink Link Adaptation sandbox with Sionna SYS.
-
-What this script teaches (map these to an MDP later):
-  - true SINR  γ_t         : channel quality used by PHYAbstraction
-  - feedback SINR γ̂_t     : noisy CQI observed by ILLA/OLLA
-  - action a_t             : MCS index chosen by ILLA or OLLA
-  - ACK/NACK b_t           : from PHYAbstraction (BLER tables)
-  - reward proxy           : spectral efficiency if ACK else 0
-
-Run (from this folder, with conda env sionna_la):
-  conda activate sionna_la
-  python run_la_sim.py
-  python run_la_sim.py --config configs/downlink_la.yaml --num-slots 200
-"""
-
 from __future__ import annotations
-
 import argparse
-from pathlib import Path
+import yaml
 from typing import Any
+
+
+
+
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import yaml
+
 from sionna.phy import config as sionna_config
 from sionna.phy.nr.utils import decode_mcs_index
 from sionna.phy.utils import db_to_lin, lin_to_db
@@ -36,50 +24,61 @@ from sionna.sys import (
 from channel import add_cqi_noise, generate_sinr_db_trace
 
 
-def load_config(path: Path) -> dict[str, Any]:
+def load_config(path: Path):
+    # dict[str, Any], from downlink_la.yaml(parameters)
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+"""        
+    f = path.open("r", encoding="utf-8")
+    data = yaml.safe_load(f)
+    f.close()
+    return data
+"""
 
 
-def spectral_efficiency(mcs_index: torch.Tensor, mcs_table_index: int) -> float:
-    """SE [bps/Hz] = modulation_order * coderate for PDSCH MCS."""
+def spectral_efficiency(mcs_index: torch.Tensor, mcs_table_index: int):
+    # float, SE [bps/Hz] = modulation_order * coderate for PDSCH MCS.
+    # mcs_index: int, MCS index chosen by ILLA or OLLA
+    # mcs_table_index: int, MCS table index
     mod_order, coderate = decode_mcs_index(
         mcs_index,
         table_index=mcs_table_index,
-        is_pusch=False,
+        is_pusch=False, # downlink
     )
-    return float((mod_order.to(dtype=coderate.dtype) * coderate).item())
+    return float((mod_order * coderate).item())
+    # (bits / symbol) * coderate
 
-
+"""
+One slot loop:
+    observe γ̂ → choose MCS → PHYAbs(true γ, MCS) → ACK → update SE/BLER logs
+"""
 def run_controller(
-    name: str,
-    controller: Any,
+    name: str, # "illa" or "olla"
+    controller: Any, # InnerLoopLinkAdaptation or OuterLoopLinkAdaptation
     sinr_true_db: np.ndarray,
-    sinr_fb_db: np.ndarray,
-    num_allocated_re: int,
-    mcs_table_index: int,
-    mcs_category: int,
-    phy_abs: PHYAbstraction,
-) -> dict[str, np.ndarray]:
-    """
-    One slot loop:
-      observe γ̂ → choose MCS → PHYAbs(true γ, MCS) → ACK → update SE/BLER logs
-    """
-    t_slots = len(sinr_true_db)
-    mcs_hist = np.zeros(t_slots, dtype=np.int32)
-    harq_hist = np.zeros(t_slots, dtype=np.int32)
-    se_hist = np.zeros(t_slots, dtype=np.float64)
-    tbler_hist = np.zeros(t_slots, dtype=np.float64)
-    bits_hist = np.zeros(t_slots, dtype=np.int32)
+    sinr_fb_db: np.ndarray, # noisy CQI
+    num_allocated_re: int, # number of allocated REs
+    mcs_table_index: int, # MCS table index
+    mcs_category: int, # MCS category
+    phy_abs: PHYAbstraction, # PHYAbstraction
+): # dict[str, np.ndarray]
+    
+    t_slots = len(sinr_true_db) # number of slots
+    mcs_hist = np.zeros(t_slots, dtype=np.int32) # MCS index history
+    harq_hist = np.zeros(t_slots, dtype=np.int32) # HARQ history
+    se_hist = np.zeros(t_slots, dtype=np.float64) # SE history
+    tbler_hist = np.zeros(t_slots, dtype=np.float64) # BLER history
+    bits_hist = np.zeros(t_slots, dtype=np.int32) # decoded bits history
 
-    num_re = torch.tensor([num_allocated_re], dtype=torch.int32)
+    num_re = torch.tensor([num_allocated_re], dtype=torch.int32) # number of allocated REs
     harq = torch.tensor([-1], dtype=torch.int32)  # missing at t=0
 
     for t in range(t_slots):
         sinr_fb = db_to_lin(torch.tensor([float(sinr_fb_db[t])], dtype=torch.float32))
         sinr_true = db_to_lin(torch.tensor([float(sinr_true_db[t])], dtype=torch.float32))
 
-        # --- policy / baseline chooses MCS from FEEDBACK only ---
+        # agent chooses MCS from feedback only
+        # agent observes sinr_eff, not sinr_true
         if name == "illa":
             mcs = controller(
                 num_allocated_re=num_re,
@@ -105,7 +104,7 @@ def run_controller(
             mcs_category=mcs_category,
         )
 
-        ack = int(harq.item())  # 1 ACK, 0 NACK
+        ack = int(harq)  # 1 ACK, 0 NACK
         se = spectral_efficiency(mcs, mcs_table_index) if ack == 1 else 0.0
 
         mcs_hist[t] = int(mcs.item())
@@ -193,7 +192,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
+def main():
     args = parse_args()
     cfg = load_config(args.config)
 

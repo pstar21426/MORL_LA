@@ -1,9 +1,5 @@
 """
 Time-correlated effective SINR process for downlink LA experiments.
-
-This is intentionally simpler than full OFDM + ray tracing.
-Purpose: learn Sionna LA (ILLA/OLLA + PHYAbstraction) first.
-Later replace `generate_sinr_db_trace` with true post-eq SINR from OFDM/RT.
 """
 
 from __future__ import annotations
