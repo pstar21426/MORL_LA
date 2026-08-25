@@ -2,57 +2,79 @@
 Time-correlated effective SINR process for downlink LA experiments.
 """
 
-from __future__ import annotations
-
-from typing import Optional
-
 import numpy as np
 
 
 def generate_sinr_db_trace(
-    num_slots: int,
-    mean_db: float = 8.0,
-    rho: float = 0.95,
-    innov_std_db: float = 1.2,
-    sinr_min_db: float = -5.0,
-    sinr_max_db: float = 25.0,
-    seed: Optional[int] = None,
-) -> np.ndarray:
+    num_slots,  # number of time slots
+    mean_db=8.0,  # mean SINR [dB]
+    rho=0.95,  # correlation (|rho|<1)
+    innov_std_db=1.2,  # innovation noise std
+    sinr_min_db=-5.0,
+    sinr_max_db=25.0,
+    mean_range_db=None,  # (lo, hi) -> randomize the operating point
+    mean_change_prob=0.0,  # per-slot probability of re-drawing it
+    seed=None,
+):
     """
-    AR(1) in dB:
-        x_{t+1} = mean + rho (x_t - mean) + eps_t,  eps ~ N(0, innov_std^2)
+    AR(1) in dB around an operating point:
+        gamma_{t+1} = mu_{t+1} + rho (gamma_t - mu_t) + eps_t,
+        eps ~ N(0, innov_std^2)
 
-    Returns shape [num_slots] float64 SINR [dB].
+    Optional `mean_range_db` draws mu uniformly in [lo, hi] and re-draws it
+    with probability `mean_change_prob` per slot. Fast fading (the AR residual)
+    is kept across a level change.
     """
-    if not (0.0 <= abs(rho) < 1.0):
-        raise ValueError("rho must satisfy |rho| < 1")
     rng = np.random.default_rng(seed)
-    x = np.empty(num_slots, dtype=np.float64)
-    x[0] = mean_db + innov_std_db * rng.standard_normal()
+
+    if mean_range_db is None:
+        mu = np.full(num_slots, float(mean_db))
+    else:
+        lo, hi = mean_range_db
+        mu = np.empty(num_slots, dtype=np.float64)
+        current = rng.uniform(lo, hi)
+        for t in range(num_slots):
+            if t > 0 and rng.random() < mean_change_prob:
+                current = rng.uniform(lo, hi)
+            mu[t] = current
+
+    gamma = np.empty(num_slots, dtype=np.float64)
+    dev = innov_std_db * rng.standard_normal()
+    gamma[0] = mu[0] + dev
     for t in range(num_slots - 1):
-        x[t + 1] = mean_db + rho * (x[t] - mean_db) + innov_std_db * rng.standard_normal()
-    return np.clip(x, sinr_min_db, sinr_max_db)
+        dev = rho * dev + innov_std_db * rng.standard_normal()
+        gamma[t + 1] = mu[t + 1] + dev
+    return np.clip(gamma, sinr_min_db, sinr_max_db)
 
 
 def add_cqi_noise(
-    sinr_true_db: np.ndarray,
-    noise_std_db: float = 1.5,
-    delay_slots: int = 0,
-    seed: Optional[int] = None,
-) -> np.ndarray:
+    sinr_true_db,
+    noise_std_db=1.5,
+    delay_slots=None,
+    seed=None,
+):
     """
-    Noisy / delayed CQI that the LA algorithm observes.
+    Noisy / delayed CQI for LA.
 
-    delay_slots=d means feedback at t uses true SINR at t-d (plus noise).
+    delay is fixed for the whole trace (not per packet):
+      - delay_slots=None → sample once with randint(1, 5) → {1,2,3,4}
+      - delay_slots=d    → use that fixed d (0 = no delay)
+
+    Returns (cqi_db, delay_used).
     """
+    # random number generator
     rng = np.random.default_rng(seed)
-    if delay_slots < 0:
-        raise ValueError("delay_slots must be >= 0")
+
+    # once per call (= once per simulation run), not every slot
+    if delay_slots is None:
+        delay_slots = int(rng.integers(1, 5))  # random delay slots {1,2,3,4}
+
     if delay_slots == 0:
-        delayed = sinr_true_db
+        delayed = sinr_true_db  # no delay
     else:
-        delayed = np.empty_like(sinr_true_db)
-        delayed[:delay_slots] = sinr_true_db[0]
-        delayed[delay_slots:] = sinr_true_db[:-delay_slots]
-    noise = noise_std_db * rng.standard_normal(size=sinr_true_db.shape)
-    return delayed + noise
+        delayed = np.empty_like(sinr_true_db)  # delayed SINR [dB]
+        delayed[:delay_slots] = sinr_true_db[0]  # initial SINR
+        delayed[delay_slots:] = sinr_true_db[:-delay_slots]  # delayed SINR
+
+    noise = noise_std_db * rng.standard_normal(size=sinr_true_db.shape)  # noise
+    return delayed + noise, delay_slots  # noisy CQI, delay_slots

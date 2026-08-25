@@ -1,164 +1,216 @@
-from __future__ import annotations
+"""
+Rule-based rollouts on DownlinkLAEnv: ILLA vs OLLA.
+
+The environment owns all dynamics (channel, HARQ-IR, PHYAbstraction); this
+script only drives it with baseline policies, plots the result, and dumps
+transitions so the same trajectories can be reused as an offline dataset.
+
+Two datasets come out of every rollout: the raw per-slot transitions, and a
+per-transport-block version built from info["is_decision"] where each sample
+is one MCS decision (see `build_decision_dataset`).
+
+Run (conda env sionna_la):
+  python run_la_sim.py
+  python run_la_sim.py --num-slots 200 --seed 1
+  python run_la_sim.py --epsilons 0.0 0.25    # extra coverage for offline RL
+"""
+
 import argparse
-import yaml
-from typing import Any
-
-
-
-
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-
+import yaml
 from sionna.phy import config as sionna_config
-from sionna.phy.nr.utils import decode_mcs_index
-from sionna.phy.utils import db_to_lin, lin_to_db
-from sionna.sys import (
-    InnerLoopLinkAdaptation,
-    OuterLoopLinkAdaptation,
-    PHYAbstraction,
-)
+from sionna.sys import PHYAbstraction
 
-from channel import add_cqi_noise, generate_sinr_db_trace
+from la_env import DownlinkLAEnv
+from policies import EpsilonGreedyPolicy, IllaPolicy, OllaPolicy
 
 
-def load_config(path: Path):
-    # dict[str, Any], from downlink_la.yaml(parameters)
+def load_config(path):
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
-"""        
-    f = path.open("r", encoding="utf-8")
-    data = yaml.safe_load(f)
-    f.close()
-    return data
-"""
 
 
-def spectral_efficiency(mcs_index: torch.Tensor, mcs_table_index: int):
-    # float, SE [bps/Hz] = modulation_order * coderate for PDSCH MCS.
-    # mcs_index: int, MCS index chosen by ILLA or OLLA
-    # mcs_table_index: int, MCS table index
-    mod_order, coderate = decode_mcs_index(
-        mcs_index,
-        table_index=mcs_table_index,
-        is_pusch=False, # downlink
-    )
-    return float((mod_order * coderate).item())
-    # (bits / symbol) * coderate
+def rollout(env, policy, seed):
+    """
+    One episode. Records both the RL transition tuple and the PHY-level
+    quantities needed for the link-adaptation plots.
+    """
+    obs, info = env.reset(seed=seed)
+    policy.reset()
 
-"""
-One slot loop:
-    observe γ̂ → choose MCS → PHYAbs(true γ, MCS) → ACK → update SE/BLER logs
-"""
-def run_controller(
-    name: str, # "illa" or "olla"
-    controller: Any, # InnerLoopLinkAdaptation or OuterLoopLinkAdaptation
-    sinr_true_db: np.ndarray,
-    sinr_fb_db: np.ndarray, # noisy CQI
-    num_allocated_re: int, # number of allocated REs
-    mcs_table_index: int, # MCS table index
-    mcs_category: int, # MCS category
-    phy_abs: PHYAbstraction, # PHYAbstraction
-): # dict[str, np.ndarray]
-    
-    t_slots = len(sinr_true_db) # number of slots
-    mcs_hist = np.zeros(t_slots, dtype=np.int32) # MCS index history
-    harq_hist = np.zeros(t_slots, dtype=np.int32) # HARQ history
-    se_hist = np.zeros(t_slots, dtype=np.float64) # SE history
-    tbler_hist = np.zeros(t_slots, dtype=np.float64) # BLER history
-    bits_hist = np.zeros(t_slots, dtype=np.int32) # decoded bits history
-
-    num_re = torch.tensor([num_allocated_re], dtype=torch.int32) # number of allocated REs
-    harq = torch.tensor([-1], dtype=torch.int32)  # missing at t=0
-
-    for t in range(t_slots):
-        sinr_fb = db_to_lin(torch.tensor([float(sinr_fb_db[t])], dtype=torch.float32))
-        sinr_true = db_to_lin(torch.tensor([float(sinr_true_db[t])], dtype=torch.float32))
-
-        # agent chooses MCS from feedback only
-        # agent observes sinr_eff, not sinr_true
-        if name == "illa":
-            mcs = controller(
-                num_allocated_re=num_re,
-                sinr_eff=sinr_fb,
-                mcs_table_index=mcs_table_index,
-                mcs_category=mcs_category,
-            )
-        else:  # olla
-            mcs = controller(
-                num_allocated_re=num_re,
-                sinr_eff=sinr_fb,
-                mcs_table_index=mcs_table_index,
-                mcs_category=mcs_category,
-                harq_feedback=harq,
-            )
-
-        # --- nature / PHY uses TRUE SINR ---
-        num_decoded_bits, harq, _sinr_eff, tbler, _bler = phy_abs(
-            mcs,
-            sinr_eff=sinr_true,
-            num_allocated_re=num_re,
-            mcs_table_index=mcs_table_index,
-            mcs_category=mcs_category,
-        )
-
-        ack = int(harq)  # 1 ACK, 0 NACK
-        se = spectral_efficiency(mcs, mcs_table_index) if ack == 1 else 0.0
-
-        mcs_hist[t] = int(mcs.item())
-        harq_hist[t] = ack
-        se_hist[t] = se
-        tbler_hist[t] = float(tbler.item())
-        bits_hist[t] = int(num_decoded_bits.item())
-
-    return {
-        "mcs": mcs_hist,
-        "harq": harq_hist,
-        "se": se_hist,
-        "tbler": tbler_hist,
-        "decoded_bits": bits_hist,
+    log = {
+        "obs": [],
+        "action": [],
+        "reward": [],
+        "next_obs": [],
+        "done": [],
+        "mcs_used": [],
+        "signalled_mcs": [],
+        "ack": [],
+        "k": [],
+        "mi_tot": [],
+        "sinr_true_db": [],
+        "sinr_fb_db": [],
+        "sinr_eq_db": [],
+        "tbler": [],
+        "decoded_bits": [],
+        "dropped": [],
+        "is_decision": [],
+        "mi_saturated": [],
     }
 
+    done = False
+    while not done:
+        action = policy(obs, info)
+        k_before = info["k"]
+        is_decision = info["is_decision"]
+        sinr_fb_before = float(obs[0])
 
-def plot_results(
-    sinr_true_db: np.ndarray,
-    sinr_fb_db: np.ndarray,
-    results: dict[str, dict[str, np.ndarray]],
-    bler_target: float,
-    out_path: Path,
-) -> None:
-    slots = np.arange(len(sinr_true_db))
-    fig, axs = plt.subplots(4, 1, figsize=(9, 10), sharex=True)
+        next_obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
 
-    axs[0].plot(slots, sinr_true_db, label="true SINR", color="C0")
-    axs[0].plot(slots, sinr_fb_db, ":", label="noisy CQI", color="C1", alpha=0.85)
+        log["obs"].append(obs)
+        log["action"].append(action)
+        log["reward"].append(reward)
+        log["next_obs"].append(next_obs)
+        log["done"].append(done)
+        log["mcs_used"].append(info["mcs_used"])
+        log["signalled_mcs"].append(info["signalled_mcs"])
+        log["ack"].append(info["ack"])
+        log["k"].append(k_before)
+        log["mi_tot"].append(info["mi_tot"])
+        log["sinr_true_db"].append(info["sinr_true_db"])
+        log["sinr_fb_db"].append(sinr_fb_before)
+        log["sinr_eq_db"].append(info["sinr_eq_db"])
+        log["tbler"].append(info["tbler"])
+        log["decoded_bits"].append(info["decoded_bits"])
+        log["dropped"].append(info["dropped"])
+        log["is_decision"].append(is_decision)
+        log["mi_saturated"].append(info["mi_saturated"])
+
+        obs = next_obs
+
+    return {k: np.asarray(v) for k, v in log.items()}
+
+
+def build_decision_dataset(res):
+    """
+    Collapse the per-slot log into one transition per transport block.
+
+    Only initial transmissions carry an action the agent chose, so a per-slot
+    dataset feeds an offline learner transitions whose action had no effect.
+    Aggregating each transport block into a single transition makes every
+    sample a real decision, at the price of a variable time step (`num_slots`,
+    which a semi-MDP discount beta^num_slots would use).
+
+    A transport block still open when the episode truncates is discarded.
+    """
+    decision = res["is_decision"].astype(bool)
+    finished = (res["ack"] == 1) | res["dropped"].astype(bool)
+    starts = np.flatnonzero(decision)
+
+    out = {k: [] for k in ("obs", "action", "reward", "next_obs", "done",
+                           "num_slots", "num_retx", "mcs", "dropped")}
+    for start in starts:
+        ends = np.flatnonzero(finished[start:])
+        if ends.size == 0:  # truncated mid-block
+            break
+        end = start + ends[0]
+        out["obs"].append(res["obs"][start])
+        out["action"].append(res["action"][start])
+        out["reward"].append(res["reward"][start : end + 1].sum())
+        out["next_obs"].append(res["next_obs"][end])
+        out["done"].append(res["done"][end])
+        out["num_slots"].append(end - start + 1)
+        out["num_retx"].append(end - start)
+        out["mcs"].append(res["mcs_used"][start])
+        out["dropped"].append(res["dropped"][end])
+
+    return {k: np.asarray(v) for k, v in out.items()}
+
+
+def summarize(name, res, bler_target):
+    ack = res["ack"]
+    initial = res["is_decision"].astype(bool)
+    retx = ~initial
+    tb_done = (ack == 1) | res["dropped"]  # transport blocks that finished
+    # share of retransmissions whose accumulated MI already exceeded the
+    # modulation ceiling, i.e. that were guaranteed to decode
+    sat = res["mi_saturated"][retx].mean() if retx.any() else 0.0
+    print(
+        f"[{name.upper()}] "
+        f"return={res['reward'].sum():.1f} | "
+        f"initial-tx BLER={1.0 - ack[initial].mean():.3f} (target {bler_target}) | "
+        f"per-tx BLER={1.0 - ack.mean():.3f} | "
+        f"mean MCS={res['mcs_used'][initial].mean():.1f} | "
+        f"retx share={retx.mean():.3f} (MI-saturated {sat:.3f}) | "
+        f"drops={int(res['dropped'].sum())}/{int(tb_done.sum())} TBs | "
+        f"bits/slot={res['decoded_bits'].mean():.1f}"
+    )
+
+
+def _rolling(x, window):
+    if len(x) < window:
+        return x.astype(np.float64)
+    kern = np.ones(window) / window
+    return np.convolve(x.astype(np.float64), kern, mode="valid")
+
+
+def plot_results(results, bler_target, out_path, mcs_window=50):
+    ref_name, ref = next(iter(results.items()))
+    slots = np.arange(len(ref["ack"]))
+    fig, axs = plt.subplots(4, 1, figsize=(9, 11), sharex=True)
+
+    axs[0].plot(slots, ref["sinr_true_db"], label="true SINR", color="C0", lw=0.9)
+    axs[0].plot(slots, ref["sinr_fb_db"], ":", label="noisy CQI", color="C1", alpha=0.8)
+    # only the reference policy, otherwise the panel is unreadable; saturated
+    # points carry no SINR information so they are marked apart
+    retx = ~ref["is_decision"].astype(bool)
+    sat = ref["mi_saturated"].astype(bool)
+    axs[0].plot(
+        slots[retx & ~sat], ref["sinr_eq_db"][retx & ~sat],
+        ".", ms=4, color="C3", label=f"{ref_name.upper()} retx equiv. SINR",
+    )
+    axs[0].plot(
+        slots[retx & sat], np.full(np.sum(retx & sat), ref["sinr_true_db"].max() + 2.0),
+        "x", ms=3, color="C4", alpha=0.6, label="retx MI-saturated (decode certain)",
+    )
     axs[0].set_ylabel("SINR [dB]")
-    axs[0].legend(loc="best")
+    axs[0].legend(loc="upper left", fontsize=7, ncol=2)
     axs[0].grid(True, alpha=0.3)
-    axs[0].set_title("5G DL LA sandbox (Sionna PHYAbstraction + ILLA/OLLA)")
+    axs[0].set_title("5G DL LA (Sionna PHYAbstraction + MIESM HARQ-IR)")
 
-    for name, style in (("illa", "-"), ("olla", "-.")):
-        axs[1].plot(slots, results[name]["mcs"], style, label=name.upper())
-    axs[1].set_ylabel("MCS index")
-    axs[1].legend(loc="best")
+    # initial transmissions only, smoothed: the raw per-slot trace saturates
+    # the panel once several policies are overlaid
+    for name, res in results.items():
+        init = res["is_decision"].astype(bool)
+        m = _rolling(res["mcs_used"][init], mcs_window)
+        axs[1].plot(slots[init][: len(m)], m, label=name.upper(), alpha=0.9)
+    axs[1].set_ylabel(f"initial-tx MCS\n({mcs_window}-tx rolling mean)")
+    axs[1].legend(loc="best", fontsize=8)
     axs[1].grid(True, alpha=0.3)
 
-    for name, style in (("illa", "-"), ("olla", "-.")):
-        axs[2].plot(slots, results[name]["se"], style, label=name.upper())
-    axs[2].set_ylabel("SE [bps/Hz]")
-    axs[2].legend(loc="best")
+    for name, res in results.items():
+        axs[2].plot(slots, np.cumsum(res["reward"]), label=name.upper())
+    axs[2].set_ylabel("cumulative reward")
+    axs[2].legend(loc="best", fontsize=8)
     axs[2].grid(True, alpha=0.3)
 
-    for name, style in (("illa", "-"), ("olla", "-.")):
-        harq = results[name]["harq"].astype(np.float64)
-        emp_bler = 1.0 - np.cumsum(harq) / np.arange(1, len(harq) + 1)
-        axs[3].plot(slots, emp_bler, style, label=f"{name.upper()} empirical BLER")
+    # the 10% target is defined on first attempts, so average over initial
+    # transmissions rather than over all slots
+    for name, res in results.items():
+        initial = res["is_decision"].astype(bool)
+        ack = res["ack"][initial].astype(np.float64)
+        emp_bler = 1.0 - np.cumsum(ack) / np.arange(1, len(ack) + 1)
+        axs[3].plot(slots[initial], emp_bler, label=f"{name.upper()} initial-tx BLER")
     axs[3].axhline(bler_target, color="k", ls="--", label="BLER target")
-    axs[3].set_ylabel("Empirical BLER")
-    axs[3].set_xlabel("Slot")
-    axs[3].legend(loc="best")
+    axs[3].set_ylabel("empirical BLER")
+    axs[3].set_xlabel("slot")
+    axs[3].legend(loc="best", fontsize=8)
     axs[3].grid(True, alpha=0.3)
 
     fig.tight_layout()
@@ -167,20 +219,8 @@ def plot_results(
     plt.close(fig)
 
 
-def summarize(name: str, res: dict[str, np.ndarray], bler_target: float) -> None:
-    emp_bler = 1.0 - float(np.mean(res["harq"]))
-    mean_se = float(np.mean(res["se"]))
-    mean_mcs = float(np.mean(res["mcs"]))
-    print(
-        f"[{name.upper()}] mean SE={mean_se:.3f} bps/Hz | "
-        f"emp BLER={emp_bler:.3f} (target {bler_target}) | "
-        f"mean MCS={mean_mcs:.1f} | "
-        f"mean decoded bits/slot={float(np.mean(res['decoded_bits'])):.1f}"
-    )
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Sionna 5G DL LA (ILLA vs OLLA)")
+def parse_args():
+    p = argparse.ArgumentParser(description="Rule-based LA rollouts (ILLA vs OLLA)")
     p.add_argument(
         "--config",
         type=Path,
@@ -188,6 +228,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num-slots", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--epsilons", type=float, nargs="+", default=None)
     p.add_argument("--out-dir", type=Path, default=None)
     return p.parse_args()
 
@@ -200,88 +241,69 @@ def main():
         cfg["num_slots"] = args.num_slots
     if args.seed is not None:
         cfg["seed"] = args.seed
+    if args.epsilons is not None:
+        cfg["collect_epsilons"] = args.epsilons
     if args.out_dir is not None:
         cfg["out_dir"] = str(args.out_dir)
 
     seed = int(cfg["seed"])
     sionna_config.seed = seed
     torch.manual_seed(seed)
-    np.random.seed(seed)
-
-    num_slots = int(cfg["num_slots"])
     bler_target = float(cfg["bler_target"])
-    mcs_table_index = int(cfg["mcs_table_index"])
-    mcs_category = int(cfg["mcs_category"])
-    num_re = int(cfg["num_allocated_re"])
+    epsilons = [float(e) for e in cfg.get("collect_epsilons", [0.0])]
 
-    print("=== Generating correlated effective SINR ===")
-    sinr_true_db = generate_sinr_db_trace(
-        num_slots=num_slots,
-        mean_db=float(cfg["sinr_mean_db"]),
-        rho=float(cfg["sinr_ar_rho"]),
-        innov_std_db=float(cfg["sinr_innov_std_db"]),
-        sinr_min_db=float(cfg["sinr_min_db"]),
-        sinr_max_db=float(cfg["sinr_max_db"]),
-        seed=seed,
-    )
-    sinr_fb_db = add_cqi_noise(
-        sinr_true_db,
-        noise_std_db=float(cfg["cqi_noise_std_db"]),
-        delay_slots=int(cfg["cqi_delay_slots"]),
-        seed=seed + 1,
-    )
-
-    print("=== Building Sionna PHYAbstraction / ILLA / OLLA ===")
+    print("=== Building Sionna PHYAbstraction (shared) ===")
     phy_abs = PHYAbstraction()
-    illa = InnerLoopLinkAdaptation(phy_abs, bler_target=bler_target)
-    olla = OuterLoopLinkAdaptation(phy_abs, num_ut=1, bler_target=bler_target)
+    env = DownlinkLAEnv.from_config(cfg, phy_abs=phy_abs)
+    n_actions = env.action_space.n
+    print(f"obs={env.observation_space.shape} actions={n_actions}")
 
-    print("=== Running ILLA ===")
-    res_illa = run_controller(
-        "illa", illa, sinr_true_db, sinr_fb_db, num_re, mcs_table_index, mcs_category, phy_abs
-    )
-    summarize("illa", res_illa, bler_target)
+    baselines = {
+        "illa": IllaPolicy(phy_abs, bler_target=bler_target),
+        "olla": OllaPolicy(phy_abs, bler_target=bler_target),
+    }
 
-    print("=== Running OLLA ===")
-    # fresh OLLA state
-    olla = OuterLoopLinkAdaptation(phy_abs, num_ut=1, bler_target=bler_target)
-    res_olla = run_controller(
-        "olla", olla, sinr_true_db, sinr_fb_db, num_re, mcs_table_index, mcs_category, phy_abs
-    )
-    summarize("olla", res_olla, bler_target)
+    results = {}
+    for eps in epsilons:
+        for name, base in baselines.items():
+            policy = (
+                base
+                if eps == 0.0
+                else EpsilonGreedyPolicy(base, n_actions, epsilon=eps, seed=seed)
+            )
+            label = name if eps == 0.0 else f"{name}_eps{eps:g}"
+            print(f"=== Rollout: {label} ===")
+            res = rollout(env, policy, seed=seed)
+            summarize(label, res, bler_target)
+            results[label] = res
 
     out_dir = Path(cfg["out_dir"])
     if not out_dir.is_absolute():
         out_dir = Path(__file__).resolve().parent / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    results = {"illa": res_illa, "olla": res_olla}
-
     if cfg.get("save_plot", True):
-        plot_path = out_dir / f"la_illa_vs_olla_seed{seed}.png"
-        plot_results(sinr_true_db, sinr_fb_db, results, bler_target, plot_path)
-        print(f"Saved plot → {plot_path}")
+        plot_path = out_dir / f"la_baselines_seed{seed}.png"
+        plot_results(results, bler_target, plot_path)
+        print(f"Saved plot -> {plot_path}")
 
     if cfg.get("save_npz", True):
-        npz_path = out_dir / f"la_illa_vs_olla_seed{seed}.npz"
-        np.savez_compressed(
-            npz_path,
-            sinr_true_db=sinr_true_db,
-            sinr_fb_db=sinr_fb_db,
-            illa_mcs=res_illa["mcs"],
-            illa_harq=res_illa["harq"],
-            illa_se=res_illa["se"],
-            illa_tbler=res_illa["tbler"],
-            olla_mcs=res_olla["mcs"],
-            olla_harq=res_olla["harq"],
-            olla_se=res_olla["se"],
-            olla_tbler=res_olla["tbler"],
-            bler_target=bler_target,
-            seed=seed,
-        )
-        print(f"Saved npz  → {npz_path}")
+        for label, res in results.items():
+            npz_path = out_dir / f"la_{label}_seed{seed}.npz"
+            np.savez_compressed(npz_path, **res, bler_target=bler_target, seed=seed)
+            print(f"Saved per-slot transitions -> {npz_path}")
 
-    print("Done. Next: read the SINR / MCS / BLER plots, then formalize as MDP.")
+    if cfg.get("save_decision_npz", True):
+        for label, res in results.items():
+            ds = build_decision_dataset(res)
+            npz_path = out_dir / f"la_{label}_seed{seed}_decisions.npz"
+            np.savez_compressed(npz_path, **ds, bler_target=bler_target, seed=seed)
+            print(
+                f"Saved {len(ds['action'])} TB transitions "
+                f"(mean {ds['num_slots'].mean():.2f} slots) -> {npz_path}"
+            )
+
+    print("Done.")
 
 
 if __name__ == "__main__":

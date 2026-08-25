@@ -1,9 +1,7 @@
-# Sionna 5G Downlink Link Adaptation (standalone)
+# Sionna 5G Downlink Link Adaptation
 
-기존 `env/la_env.py` (Appendix toy)와 **완전히 분리**된 학습용 폴더입니다.
-목표는 Sionna LA를 이해하고, 나중에 MDP → Gym으로 옮기는 것입니다.
-
-## Setup
+기존 Appendix toy (`env/la_env.py`)와 분리된 Gymnasium 환경입니다.
+ACK/NACK은 Sionna `PHYAbstraction` BLER 테이블에서 나옵니다.
 
 ```bash
 conda activate sionna_la
@@ -11,24 +9,20 @@ cd sionna_la
 python run_la_sim.py
 ```
 
-Windows에서 RT(ray tracing)는 빼 두고 `sionna-no-rt`만 설치했습니다.
-LA + PHYAbstraction 학습에는 충분합니다.
+| 파일 | 역할 |
+|------|------|
+| `la_env.py` | `DownlinkLAEnv` — dynamics의 단일 진실 공급원 |
+| `channel.py` | AR(1) effective SINR + noisy/delayed CQI |
+| `harq.py` | MIESM HARQ-IR 누적 |
+| `policies.py` | ILLA / OLLA / ε-greedy |
+| `run_la_sim.py` | 롤아웃 → plot + npz |
+| `configs/downlink_la.yaml` | 파라미터 |
 
-## What runs
+```python
+obs, info = env.reset(seed=0)
+a = policy(obs, info)          # ILLA / OLLA / RL
+obs, r, term, trunc, info = env.step(a)
+```
 
-1. `channel.py` — 시간 상관 effective SINR [dB] 생성 + noisy CQI
-2. Sionna `InnerLoopLinkAdaptation` / `OuterLoopLinkAdaptation` 이 MCS 선택
-3. Sionna `PHYAbstraction` 이 true SINR + MCS → ACK/NACK, TBLER, decoded bits
-4. `outputs/` 에 plot + npz 저장
-
-## Map to MDP (나중에 Gym화할 때)
-
-| 시뮬 양 | MDP |
-|--------|-----|
-| noisy CQI `sinr_fb_db` | observation \(o_t\) |
-| MCS index | action \(a_t\) |
-| PHYAbstraction ACK | Bernoulli transition outcome |
-| SE if ACK else 0 | reward \(r_t\) (초안) |
-| AR(1) SINR | channel dynamics (나중에 OFDM/RT로 교체) |
-
-ILLA/OLLA는 baseline policy \(\pi\)입니다. RL 에이전트는 같은 자리에서 MCS를 고르면 됩니다.
+재전송 슬롯은 `info["is_decision"]=False`이고 action은 무시됩니다.
+`run_la_sim.py`는 per-slot npz와 TB 단위 `*_decisions.npz`를 같이 저장합니다.
