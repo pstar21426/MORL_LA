@@ -1,6 +1,4 @@
-"""
-Time-correlated effective SINR process for downlink LA experiments.
-"""
+# Time-correlated effective SINR process for downlink LA experiments.
 
 import numpy as np
 
@@ -16,29 +14,21 @@ def generate_sinr_db_trace(
     mean_change_prob=0.0,  # per-slot probability of re-drawing it
     seed=None,
 ):
-    """
-    AR(1) in dB around an operating point:
-        gamma_{t+1} = mu_{t+1} + rho (gamma_t - mu_t) + eps_t,
-        eps ~ N(0, innov_std^2)
-
-    Optional `mean_range_db` draws mu uniformly in [lo, hi] and re-draws it
-    with probability `mean_change_prob` per slot. Fast fading (the AR residual)
-    is kept across a level change.
-    """
+    # AR(1) effective SINR + noisy/delayed CQI
     rng = np.random.default_rng(seed)
 
     if mean_range_db is None:
         mu = np.full(num_slots, float(mean_db))
     else:
         lo, hi = mean_range_db
-        mu = np.empty(num_slots, dtype=np.float64)
+        mu = np.empty(num_slots)
         current = rng.uniform(lo, hi)
         for t in range(num_slots):
             if t > 0 and rng.random() < mean_change_prob:
                 current = rng.uniform(lo, hi)
             mu[t] = current
 
-    gamma = np.empty(num_slots, dtype=np.float64)
+    gamma = np.empty(num_slots)
     dev = innov_std_db * rng.standard_normal()
     gamma[0] = mu[0] + dev
     for t in range(num_slots - 1):
@@ -47,22 +37,8 @@ def generate_sinr_db_trace(
     return np.clip(gamma, sinr_min_db, sinr_max_db)
 
 
-def add_cqi_noise(
-    sinr_true_db,
-    noise_std_db=1.5,
-    delay_slots=None,
-    seed=None,
-):
-    """
-    Noisy / delayed CQI for LA.
-
-    delay is fixed for the whole trace (not per packet):
-      - delay_slots=None → sample once with randint(1, 5) → {1,2,3,4}
-      - delay_slots=d    → use that fixed d (0 = no delay)
-
-    Returns (cqi_db, delay_used).
-    """
-    # random number generator
+def add_cqi_noise(sinr_true_db, noise_std_db=1.5, delay_slots=None, seed=None):
+    # delay_slots=None -> pick fixed delay in {1,2,3,4} once per episode
     rng = np.random.default_rng(seed)
 
     # once per call (= once per simulation run), not every slot

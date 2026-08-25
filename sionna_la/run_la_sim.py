@@ -1,19 +1,4 @@
-"""
-Rule-based rollouts on DownlinkLAEnv: ILLA vs OLLA.
-
-The environment owns all dynamics (channel, HARQ-IR, PHYAbstraction); this
-script only drives it with baseline policies, plots the result, and dumps
-transitions so the same trajectories can be reused as an offline dataset.
-
-Two datasets come out of every rollout: the raw per-slot transitions, and a
-per-transport-block version built from info["is_decision"] where each sample
-is one MCS decision (see `build_decision_dataset`).
-
-Run (conda env sionna_la):
-  python run_la_sim.py
-  python run_la_sim.py --num-slots 200 --seed 1
-  python run_la_sim.py --epsilons 0.0 0.25    # extra coverage for offline RL
-"""
+# ILLA vs OLLA rollout on DownlinkLAEnv
 
 import argparse
 from pathlib import Path
@@ -35,33 +20,15 @@ def load_config(path):
 
 
 def rollout(env, policy, seed):
-    """
-    One episode. Records both the RL transition tuple and the PHY-level
-    quantities needed for the link-adaptation plots.
-    """
     obs, info = env.reset(seed=seed)
     policy.reset()
 
-    log = {
-        "obs": [],
-        "action": [],
-        "reward": [],
-        "next_obs": [],
-        "done": [],
-        "mcs_used": [],
-        "signalled_mcs": [],
-        "ack": [],
-        "k": [],
-        "mi_tot": [],
-        "sinr_true_db": [],
-        "sinr_fb_db": [],
-        "sinr_eq_db": [],
-        "tbler": [],
-        "decoded_bits": [],
-        "dropped": [],
-        "is_decision": [],
-        "mi_saturated": [],
-    }
+    log = {k: [] for k in (
+        "obs", "action", "reward", "next_obs", "done",
+        "mcs_used", "signalled_mcs", "ack", "k", "mi_tot",
+        "sinr_true_db", "sinr_fb_db", "sinr_eq_db",
+        "tbler", "decoded_bits", "dropped", "is_decision", "mi_saturated",
+    )}
 
     done = False
     while not done:
@@ -91,33 +58,24 @@ def rollout(env, policy, seed):
         log["dropped"].append(info["dropped"])
         log["is_decision"].append(is_decision)
         log["mi_saturated"].append(info["mi_saturated"])
-
         obs = next_obs
 
     return {k: np.asarray(v) for k, v in log.items()}
 
 
 def build_decision_dataset(res):
-    """
-    Collapse the per-slot log into one transition per transport block.
-
-    Only initial transmissions carry an action the agent chose, so a per-slot
-    dataset feeds an offline learner transitions whose action had no effect.
-    Aggregating each transport block into a single transition makes every
-    sample a real decision, at the price of a variable time step (`num_slots`,
-    which a semi-MDP discount beta^num_slots would use).
-
-    A transport block still open when the episode truncates is discarded.
-    """
+    # initial-tx slots only -> TB-level (s, a, R, s')
     decision = res["is_decision"].astype(bool)
     finished = (res["ack"] == 1) | res["dropped"].astype(bool)
     starts = np.flatnonzero(decision)
 
-    out = {k: [] for k in ("obs", "action", "reward", "next_obs", "done",
-                           "num_slots", "num_retx", "mcs", "dropped")}
+    out = {k: [] for k in (
+        "obs", "action", "reward", "next_obs", "done",
+        "num_slots", "num_retx", "mcs", "dropped",
+    )}
     for start in starts:
         ends = np.flatnonzero(finished[start:])
-        if ends.size == 0:  # truncated mid-block
+        if ends.size == 0:
             break
         end = start + ends[0]
         out["obs"].append(res["obs"][start])
@@ -129,7 +87,6 @@ def build_decision_dataset(res):
         out["num_retx"].append(end - start)
         out["mcs"].append(res["mcs_used"][start])
         out["dropped"].append(res["dropped"][end])
-
     return {k: np.asarray(v) for k, v in out.items()}
 
 
@@ -137,9 +94,7 @@ def summarize(name, res, bler_target):
     ack = res["ack"]
     initial = res["is_decision"].astype(bool)
     retx = ~initial
-    tb_done = (ack == 1) | res["dropped"]  # transport blocks that finished
-    # share of retransmissions whose accumulated MI already exceeded the
-    # modulation ceiling, i.e. that were guaranteed to decode
+    tb_done = (ack == 1) | res["dropped"]
     sat = res["mi_saturated"][retx].mean() if retx.any() else 0.0
     print(
         f"[{name.upper()}] "
@@ -147,17 +102,15 @@ def summarize(name, res, bler_target):
         f"initial-tx BLER={1.0 - ack[initial].mean():.3f} (target {bler_target}) | "
         f"per-tx BLER={1.0 - ack.mean():.3f} | "
         f"mean MCS={res['mcs_used'][initial].mean():.1f} | "
-        f"retx share={retx.mean():.3f} (MI-saturated {sat:.3f}) | "
-        f"drops={int(res['dropped'].sum())}/{int(tb_done.sum())} TBs | "
-        f"bits/slot={res['decoded_bits'].mean():.1f}"
+        f"retx share={retx.mean():.3f} (MI-sat {sat:.3f}) | "
+        f"drops={int(res['dropped'].sum())}/{int(tb_done.sum())} TBs"
     )
 
 
 def _rolling(x, window):
     if len(x) < window:
         return x.astype(np.float64)
-    kern = np.ones(window) / window
-    return np.convolve(x.astype(np.float64), kern, mode="valid")
+    return np.convolve(x.astype(np.float64), np.ones(window) / window, mode="valid")
 
 
 def plot_results(results, bler_target, out_path, mcs_window=50):
@@ -167,48 +120,38 @@ def plot_results(results, bler_target, out_path, mcs_window=50):
 
     axs[0].plot(slots, ref["sinr_true_db"], label="true SINR", color="C0", lw=0.9)
     axs[0].plot(slots, ref["sinr_fb_db"], ":", label="noisy CQI", color="C1", alpha=0.8)
-    # only the reference policy, otherwise the panel is unreadable; saturated
-    # points carry no SINR information so they are marked apart
     retx = ~ref["is_decision"].astype(bool)
     sat = ref["mi_saturated"].astype(bool)
     axs[0].plot(
         slots[retx & ~sat], ref["sinr_eq_db"][retx & ~sat],
-        ".", ms=4, color="C3", label=f"{ref_name.upper()} retx equiv. SINR",
-    )
-    axs[0].plot(
-        slots[retx & sat], np.full(np.sum(retx & sat), ref["sinr_true_db"].max() + 2.0),
-        "x", ms=3, color="C4", alpha=0.6, label="retx MI-saturated (decode certain)",
+        ".", ms=4, color="C3", label=f"{ref_name.upper()} retx equiv SINR",
     )
     axs[0].set_ylabel("SINR [dB]")
     axs[0].legend(loc="upper left", fontsize=7, ncol=2)
     axs[0].grid(True, alpha=0.3)
-    axs[0].set_title("5G DL LA (Sionna PHYAbstraction + MIESM HARQ-IR)")
+    axs[0].set_title("5G DL LA (PHYAbstraction + HARQ-IR)")
 
-    # initial transmissions only, smoothed: the raw per-slot trace saturates
-    # the panel once several policies are overlaid
     for name, res in results.items():
         init = res["is_decision"].astype(bool)
         m = _rolling(res["mcs_used"][init], mcs_window)
-        axs[1].plot(slots[init][: len(m)], m, label=name.upper(), alpha=0.9)
-    axs[1].set_ylabel(f"initial-tx MCS\n({mcs_window}-tx rolling mean)")
+        axs[1].plot(slots[init][: len(m)], m, label=name.upper())
+    axs[1].set_ylabel(f"MCS ({mcs_window}-tx roll mean)")
     axs[1].legend(loc="best", fontsize=8)
     axs[1].grid(True, alpha=0.3)
 
     for name, res in results.items():
         axs[2].plot(slots, np.cumsum(res["reward"]), label=name.upper())
-    axs[2].set_ylabel("cumulative reward")
+    axs[2].set_ylabel("cum reward")
     axs[2].legend(loc="best", fontsize=8)
     axs[2].grid(True, alpha=0.3)
 
-    # the 10% target is defined on first attempts, so average over initial
-    # transmissions rather than over all slots
     for name, res in results.items():
         initial = res["is_decision"].astype(bool)
         ack = res["ack"][initial].astype(np.float64)
-        emp_bler = 1.0 - np.cumsum(ack) / np.arange(1, len(ack) + 1)
-        axs[3].plot(slots[initial], emp_bler, label=f"{name.upper()} initial-tx BLER")
-    axs[3].axhline(bler_target, color="k", ls="--", label="BLER target")
-    axs[3].set_ylabel("empirical BLER")
+        emp = 1.0 - np.cumsum(ack) / np.arange(1, len(ack) + 1)
+        axs[3].plot(slots[initial], emp, label=f"{name.upper()} BLER")
+    axs[3].axhline(bler_target, color="k", ls="--", label="target")
+    axs[3].set_ylabel("emp BLER")
     axs[3].set_xlabel("slot")
     axs[3].legend(loc="best", fontsize=8)
     axs[3].grid(True, alpha=0.3)
@@ -219,24 +162,17 @@ def plot_results(results, bler_target, out_path, mcs_window=50):
     plt.close(fig)
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Rule-based LA rollouts (ILLA vs OLLA)")
-    p.add_argument(
-        "--config",
-        type=Path,
-        default=Path(__file__).resolve().parent / "configs" / "downlink_la.yaml",
-    )
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", type=Path,
+                   default=Path(__file__).resolve().parent / "configs" / "downlink_la.yaml")
     p.add_argument("--num-slots", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--epsilons", type=float, nargs="+", default=None)
     p.add_argument("--out-dir", type=Path, default=None)
-    return p.parse_args()
+    args = p.parse_args()
 
-
-def main():
-    args = parse_args()
     cfg = load_config(args.config)
-
     if args.num_slots is not None:
         cfg["num_slots"] = args.num_slots
     if args.seed is not None:
@@ -252,7 +188,7 @@ def main():
     bler_target = float(cfg["bler_target"])
     epsilons = [float(e) for e in cfg.get("collect_epsilons", [0.0])]
 
-    print("=== Building Sionna PHYAbstraction (shared) ===")
+    print("=== PHYAbstraction + env ===")
     phy_abs = PHYAbstraction()
     env = DownlinkLAEnv.from_config(cfg, phy_abs=phy_abs)
     n_actions = env.action_space.n
@@ -266,12 +202,11 @@ def main():
     results = {}
     for eps in epsilons:
         for name, base in baselines.items():
-            policy = (
-                base
-                if eps == 0.0
-                else EpsilonGreedyPolicy(base, n_actions, epsilon=eps, seed=seed)
-            )
-            label = name if eps == 0.0 else f"{name}_eps{eps:g}"
+            if eps == 0.0:
+                policy, label = base, name
+            else:
+                policy = EpsilonGreedyPolicy(base, n_actions, epsilon=eps, seed=seed)
+                label = f"{name}_eps{eps:g}"
             print(f"=== Rollout: {label} ===")
             res = rollout(env, policy, seed=seed)
             summarize(label, res, bler_target)
@@ -283,25 +218,22 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if cfg.get("save_plot", True):
-        plot_path = out_dir / f"la_baselines_seed{seed}.png"
-        plot_results(results, bler_target, plot_path)
-        print(f"Saved plot -> {plot_path}")
+        path = out_dir / f"la_baselines_seed{seed}.png"
+        plot_results(results, bler_target, path)
+        print(f"Saved plot -> {path}")
 
     if cfg.get("save_npz", True):
         for label, res in results.items():
-            npz_path = out_dir / f"la_{label}_seed{seed}.npz"
-            np.savez_compressed(npz_path, **res, bler_target=bler_target, seed=seed)
-            print(f"Saved per-slot transitions -> {npz_path}")
+            path = out_dir / f"la_{label}_seed{seed}.npz"
+            np.savez_compressed(path, **res, bler_target=bler_target, seed=seed)
+            print(f"Saved -> {path}")
 
     if cfg.get("save_decision_npz", True):
         for label, res in results.items():
             ds = build_decision_dataset(res)
-            npz_path = out_dir / f"la_{label}_seed{seed}_decisions.npz"
-            np.savez_compressed(npz_path, **ds, bler_target=bler_target, seed=seed)
-            print(
-                f"Saved {len(ds['action'])} TB transitions "
-                f"(mean {ds['num_slots'].mean():.2f} slots) -> {npz_path}"
-            )
+            path = out_dir / f"la_{label}_seed{seed}_decisions.npz"
+            np.savez_compressed(path, **ds, bler_target=bler_target, seed=seed)
+            print(f"Saved {len(ds['action'])} TB transitions -> {path}")
 
     print("Done.")
 
