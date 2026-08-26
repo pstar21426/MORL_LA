@@ -1,13 +1,7 @@
 # Sionna 5G Downlink Link Adaptation
 
-기존 Appendix toy (`env/la_env.py`)와 분리된 Gymnasium 환경입니다.
 ACK/NACK은 Sionna `PHYAbstraction` BLER 테이블에서 나옵니다.
 
-```bash
-conda activate sionna_la
-cd sionna_la
-python run_la_sim.py
-```
 
 | 파일 | 역할 |
 |------|------|
