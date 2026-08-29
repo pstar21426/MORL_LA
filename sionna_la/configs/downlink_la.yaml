@@ -18,22 +18,28 @@ sinr_max_db: 35.0
 sinr_mean_range_db: null
 sinr_mean_change_prob: 0.0
 
-# Imperfect CQI (what the controller sees)
+# Imperfect CSI before CQI quantization (delay + noise on true SINR)
 cqi_noise_std_db: 1.5
 # null → randint(1, 5) = {1,2,3,4} once per episode; int → fixed delay
 cqi_delay_slots: null
+# reported CQI = max q s.t. TBLER(MCS(q), SINR_hat) <= target (via PHYAbstraction)
+cqi_bler_target: 0.1
+# BS holds period-average CQI between reports (LTE ~40 ms @ 1 ms/slot -> 40)
+cqi_report_period: 40
+# first-tx ACK/NACK visible to BS after TB finish + this many slots
+ack_delay_slots: 8
+# srsRAN-style OLLA SNR step (dB); step_down = step_up * (1/BLER - 1)
+olla_step_up_db: 0.001
 
 # HARQ-IR (MI accumulation)
 mi_combining_rho: 0.9
 harq_max_retx: 2
 drop_penalty: 6.0
 
-# Observation history (initial transmissions only)
-obs_num_lags: 3
-obs_bler_window: 100
+# State history (decision-step): [cqi x L, m x L, b x L]
+state_num_lags: 3
 
 collect_epsilons: [0.0]
-save_decision_npz: true
 
 out_dir: outputs
 save_plot: true
