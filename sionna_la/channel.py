@@ -41,7 +41,6 @@ def add_cqi_noise(sinr_true_db, noise_std_db=1.5, delay_slots=None, seed=None):
     # delay_slots=None -> pick fixed delay in {1,2,3,4} once per episode
     rng = np.random.default_rng(seed)
 
-    # once per call (= once per simulation run), not every slot
     if delay_slots is None:
         delay_slots = int(rng.integers(1, 5))  # random delay slots {1,2,3,4}
 

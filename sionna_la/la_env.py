@@ -1,9 +1,15 @@
-# Gym env: 5G DL link adaptation (Sionna PHYAbstraction + HARQ-IR)
+# Gym env: decision-step 5G DL LA (Sionna PHYAbstraction + HARQ-IR)
 #
-# obs:  [sinr_fb, d_sinr, mcs_hist x3, ack_hist x3, bler_hat, last_retx/K]
-# act:  MCS (ignored on retx; initial MCS stays locked)
-# ACK:  Bernoulli via PHYAbstraction(TBLER)
-# r:    ACK -> Qm*coderate, NACK -> 0, drop -> -drop_penalty
+# One Gym step = one transport block (initial MCS + internal retx slots).
+# Agent state: [cqi^(0..L-1), m^(1..L), b^(1..L)]  (default L=3 → 9-dim)
+#   cqi^(0)     current reported CQI / 15
+#   cqi^(1..L-1) past decision CQIs (most recent first); unseen = -1
+#   m, b        past decisions (MCS norm, first-tx ACK); unseen = -1
+# True SINR γ is logged in info["sinr_true_db"] (not part of agent state).
+# delta_tau stays in info only (not in state)
+# γ̂ = delayed + noisy SINR (UE measurement before CQI quantization)
+# Reward: SE/num_tx if TB ACKs, -drop_penalty if dropped, 0 on intermediate NACKs
+# ILLA/OLLA baselines use discrete CQI only (see policies.py)
 
 from collections import deque
 
@@ -16,40 +22,29 @@ from sionna.phy.utils import db_to_lin
 from sionna.sys import PHYAbstraction
 
 from channel import add_cqi_noise, generate_sinr_db_trace
+from cqi import build_bs_cqi_trace, build_cqi_to_mcs, normalize_cqi, report_cqi
 from harq import SNR_GRID_MAX_DB, HarqProcess, mod_from_qm
 
-# table index -> (min MCS, max MCS) with PHYAbstraction coverage
 _MCS_RANGE = {1: (3, 28), 2: (2, 27)}
 _UNSEEN = -1.0
 
 
-class InitialTxHistory:
-    # log initial transmissions only (slots where the agent picks MCS)
+class DecisionHistory:
+    # past decision CQI / MCS / first-attempt ACK
 
-    def __init__(self, num_lags=3, bler_window=100):
+    def __init__(self, num_lags=3):
         self.num_lags = num_lags
-        self.bler_window = bler_window
         self.reset()
 
     def reset(self):
+        self.cqi = deque([_UNSEEN] * self.num_lags, maxlen=self.num_lags)
         self.mcs = deque([_UNSEEN] * self.num_lags, maxlen=self.num_lags)
         self.ack = deque([_UNSEEN] * self.num_lags, maxlen=self.num_lags)
-        self._window = deque(maxlen=self.bler_window)
-        self.last_tb_retx = 0
 
-    def push_initial_tx(self, mcs_norm, ack):
+    def push(self, cqi_n, mcs_norm, first_ack):
+        self.cqi.appendleft(float(cqi_n))
         self.mcs.appendleft(float(mcs_norm))
-        self.ack.appendleft(float(ack))
-        self._window.append(int(ack))
-
-    def push_tb_end(self, num_retx):
-        self.last_tb_retx = int(num_retx)
-
-    @property
-    def bler(self):
-        if not self._window:
-            return 0.0
-        return 1.0 - sum(self._window) / len(self._window)
+        self.ack.appendleft(float(first_ack))
 
 
 class DownlinkLAEnv(gym.Env):
@@ -66,15 +61,17 @@ class DownlinkLAEnv(gym.Env):
         sinr_innov_std_db=1.2,
         sinr_min_db=-5.0,
         sinr_max_db=25.0,
-        sinr_mean_range_db=None,
-        sinr_mean_change_prob=0.0,
+        sinr_mean_range_db=None, # range of the mean SINR
+        sinr_mean_change_prob=0.0, # probability of changing the mean SINR  
         cqi_noise_std_db=1.5,
         cqi_delay_slots=None,
-        mi_combining_rho=0.9,
+        cqi_report_period=1,
+        cqi_bler_target=0.1,
+        ack_delay_slots=0,
+        mi_combining_rho=0.9, # discount ratio for MI accumulation
         harq_max_retx=3,
         drop_penalty=2.0,
-        obs_num_lags=3,
-        obs_bler_window=100,
+        state_num_lags=3,
         phy_abs=None,
     ):
         super().__init__()
@@ -95,30 +92,42 @@ class DownlinkLAEnv(gym.Env):
         self.sinr_mean_change_prob = sinr_mean_change_prob
         self.cqi_noise_std_db = cqi_noise_std_db
         self.cqi_delay_slots = cqi_delay_slots
+        self.cqi_report_period = max(1, int(cqi_report_period))
+        self.cqi_bler_target = float(cqi_bler_target)
+        self.ack_delay_slots = max(0, int(ack_delay_slots))
         self.drop_penalty = drop_penalty
 
-        # Sionna BLER/ACK engine (package)
         self.phy_abs = phy_abs if phy_abs is not None else PHYAbstraction()
         self.harq = HarqProcess(combining_rho=mi_combining_rho, max_retx=harq_max_retx)
-        self.hist = InitialTxHistory(num_lags=obs_num_lags, bler_window=obs_bler_window)
+        self.hist = DecisionHistory(num_lags=state_num_lags)
 
         self.mcs_min, self.mcs_max = _MCS_RANGE[self.mcs_table_index]
         self._mcs_span = self.mcs_max - self.mcs_min
+        self._cqi_to_mcs = build_cqi_to_mcs(
+            self.mcs_min, self.mcs_max, mcs_table_index=self.mcs_table_index
+        )
         self.action_space = spaces.Discrete(self._mcs_span + 1)
 
+        # [cqi x L, m x L, b x L] — CQI/MCS normalized; unseen fills = -1
         n = self.hist.num_lags
-        self.observation_space = spaces.Box(
-            low=np.array([-50.0, -50.0] + [_UNSEEN] * (2 * n) + [0.0, 0.0], dtype=np.float32),
-            high=np.array([50.0, 50.0] + [1.0] * (2 * n) + [1.0, 1.0], dtype=np.float32),
+        self.state_space = spaces.Box(
+            low=np.full(3 * n, _UNSEEN, dtype=np.float32),
+            high=np.ones(3 * n, dtype=np.float32),
             dtype=np.float32,
         )
+        # Gymnasium requires this name; same object as state_space
+        self.observation_space = self.state_space
 
         self._num_re_t = torch.tensor([self.num_allocated_re], dtype=torch.int32)
         self._sinr_true_db = np.zeros(self.num_slots)
         self._sinr_fb_db = np.zeros(self.num_slots)
+        self._bs_cqi = np.zeros(self.num_slots, dtype=np.int32)
         self._delay_used = 0
         self._t = 0
-        self._last_ack = -1
+        self._last_decision_slot = 0
+        self._ever_decided = False
+        self._pending_harq = [-1]  # fed to OLLA on next decision
+        self._fb_queue = deque()  # (delivery_slot, first_ack, cqi_n, mcs_norm)
 
     def mcs_from_action(self, action):
         return int(action) + self.mcs_min
@@ -134,44 +143,83 @@ class DownlinkLAEnv(gym.Env):
         )
         return int(qm.item()), float(rate.item())
 
-    def _obs(self):
-        idx = min(self._t, self.num_slots - 1)
-        sinr_fb = float(self._sinr_fb_db[idx])
-        prev = float(self._sinr_fb_db[idx - 1]) if idx > 0 else sinr_fb
+    def _sinr_hat_db(self, slot):
+        # UE effective-SINR estimate (delayed + noisy), before CQI quantization
+        idx = min(max(slot, 0), self.num_slots - 1)
+        return float(self._sinr_fb_db[idx])
+
+    def _gamma_at(self, slot):
+        idx = min(max(slot, 0), self.num_slots - 1)
+        return float(self._sinr_true_db[idx])
+
+    def _report_cqi_at(self, slot):
+        idx = min(max(int(slot), 0), self.num_slots - 1)
+        if self.cqi_report_period > 1:
+            return int(self._bs_cqi[idx])
+        sinr_lin = db_to_lin(
+            torch.tensor([self._sinr_hat_db(slot)], dtype=torch.float32)
+        )
+        return report_cqi(
+            self.phy_abs,
+            sinr_lin,
+            self._num_re_t,
+            self._cqi_to_mcs,
+            mcs_table_index=self.mcs_table_index,
+            mcs_category=self.mcs_category,
+            bler_target=self.cqi_bler_target,
+        )
+
+    def _drain_feedback(self, now_slot):
+        # ACK/NACK + delayed history push (BS learns first_ack at delivery_slot)
+        self._pending_harq = [-1]
+        while self._fb_queue and self._fb_queue[0][0] <= now_slot:
+            _, first_ack, cqi_n, mcs_norm = self._fb_queue.popleft()
+            self.hist.push(cqi_n, mcs_norm, int(first_ack))
+            self._pending_harq = [int(first_ack)]
+
+    def _state(self, cqi_index=None):
+        # agent state at current decision slot _t
+        if cqi_index is None:
+            cqi_index = self._report_cqi_at(self._t)
+        cqi_n = normalize_cqi(cqi_index)
+        n = self.hist.num_lags
+        # [cqi_t, cqi_{t-1}, ..., cqi_{t-L+1}]
+        cqi_hist = [cqi_n, *list(self.hist.cqi)[: n - 1]]
         return np.array(
-            [
-                sinr_fb,
-                sinr_fb - prev,
-                *self.hist.mcs,
-                *self.hist.ack,
-                self.hist.bler,
-                self.hist.last_tb_retx / max(self.harq.max_retx, 1),
-            ],
+            [*cqi_hist, *self.hist.mcs, *self.hist.ack],
             dtype=np.float32,
         )
 
-    def _info(self, outcome=None):
-        idx = min(self._t, self.num_slots - 1)
+    def _info(self, outcome=None, cqi_index=None):
+        if cqi_index is None:
+            cqi_index = self._report_cqi_at(self._t)
+        sinr_hat_db = self._sinr_hat_db(self._t)
         info = {
-            # for ILLA/OLLA, which want linear SINR and HARQ feedback
+            # true channel (hidden from agent state vector)
+            "sinr_true_db": self._gamma_at(self._t),
+            # sinr_hat kept for logging; baselines use cqi_index (discrete) only
             "sinr_eff_lin": db_to_lin(
-                torch.tensor([self._sinr_fb_db[idx]], dtype=torch.float32)
+                torch.tensor([sinr_hat_db], dtype=torch.float32)
             ),
+            "sinr_hat_db": sinr_hat_db,
+            "cqi_index": int(cqi_index),
+            "cqi_norm": normalize_cqi(cqi_index),
             "num_allocated_re": self._num_re_t,
-            "harq_feedback": torch.tensor([self._last_ack], dtype=torch.int32),
+            "harq_feedbacks": list(self._pending_harq),
             "mcs_table_index": self.mcs_table_index,
             "mcs_category": self.mcs_category,
             "mcs_min": self.mcs_min,
             "mcs_max": self.mcs_max,
-            # bookkeeping
+            # bookkeeping (tau not in state; logging / analysis only)
             "slot": self._t,
-            "k": self.harq.k,
-            "mi_tot": self.harq.mi_tot,
-            "is_retransmission": self.harq.is_retransmission,
-            "is_decision": not self.harq.is_retransmission,
-            "last_tb_retx": self.hist.last_tb_retx,
-            "bler_hat": self.hist.bler,
+            "delta_tau": (
+                0.0
+                if not self._ever_decided
+                else float(self._t - self._last_decision_slot)
+            ),
             "cqi_delay_slots": self._delay_used,
+            "cqi_report_period": self.cqi_report_period,
+            "ack_delay_slots": self.ack_delay_slots,
         }
         if outcome:
             info.update(outcome)
@@ -198,30 +246,41 @@ class DownlinkLAEnv(gym.Env):
             seed=None if seed is None else seed + 1,
         )
 
+        self._sinr_fb_db, self._delay_used = add_cqi_noise(
+            self._sinr_true_db,
+            noise_std_db=self.cqi_noise_std_db,
+            delay_slots=self.cqi_delay_slots,
+            seed=None if seed is None else seed + 1,
+        )
+        if self.cqi_report_period > 1:
+            self._bs_cqi, _ = build_bs_cqi_trace(
+                self.phy_abs,
+                self._sinr_fb_db,
+                self._num_re_t,
+                self._cqi_to_mcs,
+                self.cqi_report_period,
+                mcs_table_index=self.mcs_table_index,
+                mcs_category=self.mcs_category,
+                bler_target=self.cqi_bler_target,
+            )
+        else:
+            self._bs_cqi = np.zeros(self.num_slots, dtype=np.int32)
+
         self.harq.reset()
         self.hist.reset()
         self._t = 0
-        self._last_ack = -1  # no feedback yet
-        return self._obs(), self._info()
+        self._last_decision_slot = 0
+        self._ever_decided = False
+        self._pending_harq = [-1]
+        self._fb_queue.clear()
+        self._drain_feedback(0)
+        cqi_index = self._report_cqi_at(self._t)
+        return self._state(cqi_index), self._info(cqi_index=cqi_index)
 
-    def step(self, action):
-        t = self._t
-        sinr_true_db = float(self._sinr_true_db[t])
-        is_initial = not self.harq.is_retransmission
-
-        # MCS selection (locked during retransmissions)
-        if is_initial:
-            mcs_used = self.mcs_from_action(action)
-            qm, coderate = self._mcs_properties(mcs_used)
-            self.harq.start_transmission(mcs_used, qm)
-        else:
-            mcs_used = self.harq.mcs
-            qm, coderate = self._mcs_properties(mcs_used)
-
-        # MI accumulation (equivalent SINR seen by the BLER tables)
+    def _phy_once(self, mcs_used):
+        sinr_true_db = self._gamma_at(self._t)
         sinr_eq_db = self.harq.accumulate(sinr_true_db)
         sinr_eq_lin = db_to_lin(torch.tensor([sinr_eq_db], dtype=torch.float32))
-
         decoded_bits, harq_fb, _, tbler, _ = self.phy_abs(
             torch.tensor([mcs_used], dtype=torch.int32),
             sinr_eff=sinr_eq_lin,
@@ -229,52 +288,119 @@ class DownlinkLAEnv(gym.Env):
             mcs_table_index=self.mcs_table_index,
             mcs_category=self.mcs_category,
         )
-        ack = int(harq_fb.item())  # 1=ACK, 0=NACK
-
-        signalled = (
-            mcs_used if is_initial else self.harq.signalled_mcs(self.mcs_table_index)
+        return (
+            int(harq_fb.item()),
+            float(tbler.item()),
+            int(decoded_bits.item()),
+            sinr_true_db,
+            sinr_eq_db,
         )
 
-        if is_initial:
-            self.hist.push_initial_tx((mcs_used - self.mcs_min) / self._mcs_span, ack)
+    def step(self, action):
+        if self._t >= self.num_slots:
+            return self._state(), 0.0, False, True, self._info()
 
+        self._drain_feedback(self._t)
+
+        decision_slot = self._t
+        decision_cqi = self._report_cqi_at(self._t)
+        decision_cqi_n = normalize_cqi(decision_cqi)
+        decision_sinr_hat = self._sinr_hat_db(self._t)
+        decision_gamma = self._gamma_at(self._t)
+
+        mcs_used = self.mcs_from_action(action)
+        qm, coderate = self._mcs_properties(mcs_used)
+        self.harq.start_transmission(mcs_used, qm)
+
+        reward = 0.0
+        harq_seq = []
+        first_ack = None
         dropped = False
-        if ack == 1:
-            reward = qm * coderate  # SE [bps/Hz]
-            self.hist.push_tb_end(self.harq.k)
-            self.harq.reset()
-        else:
-            reward = 0.0
-            num_retx = self.harq.k
+        num_tx = 0
+        last_tbler = 0.0
+        last_bits = 0
+        last_sinr_eq = decision_gamma
+        mi_sat = False
+
+        # run whole TB: initial + retx until ACK/drop or slots run out
+        while self._t < self.num_slots:
+            ack, tbler, bits, _, sinr_eq = self._phy_once(mcs_used)
+            harq_seq.append(ack)
+            num_tx += 1
+            last_tbler, last_bits, last_sinr_eq = tbler, bits, sinr_eq
+            mi_sat = sinr_eq >= SNR_GRID_MAX_DB - 1e-6 # check if the MI is saturated
+
+            if first_ack is None:
+                first_ack = ack
+
+            self._t += 1
+
+            if ack == 1:
+                reward = qm * coderate / num_tx
+                self.harq.reset()
+                break
+
             dropped = self.harq.on_nack()
             if dropped:
                 reward = -self.drop_penalty
-                self.hist.push_tb_end(num_retx)
+                break
+        else:
+            # truncated mid-TB
+            dropped = True
+            if self.harq.mcs is not None:
+                self.harq.reset()
 
+        mcs_norm = (mcs_used - self.mcs_min) / self._mcs_span
+        first_ack_i = int(first_ack or 0)
+        if self.ack_delay_slots > 0:
+            self._fb_queue.append(
+                (
+                    self._t + self.ack_delay_slots,
+                    first_ack_i,
+                    decision_cqi_n,
+                    mcs_norm,
+                )
+            )
+        else:
+            self.hist.push(decision_cqi_n, mcs_norm, first_ack_i)
+            self._pending_harq = [first_ack_i] if harq_seq else [-1]
+
+        self._last_decision_slot = decision_slot
+        self._ever_decided = True
+
+        truncated = self._t >= self.num_slots
+        next_cqi = self._report_cqi_at(self._t) if not truncated else decision_cqi
         outcome = {
-            "ack": ack,
-            "is_initial_tx": is_initial,
+            "ack": int(first_ack or 0),  # first-attempt ACK
+            "tb_success": int(reward > 0),
             "mcs_used": mcs_used,
-            "signalled_mcs": signalled,
+            "signalled_mcs": mcs_used,
             "qm": qm,
             "coderate": coderate,
             "modulation": mod_from_qm(qm),
-            "sinr_true_db": sinr_true_db,
-            "sinr_eq_db": sinr_eq_db,
-            "mi_saturated": sinr_eq_db >= SNR_GRID_MAX_DB - 1e-6,
-            "tbler": float(tbler.item()),
-            "decoded_bits": int(decoded_bits.item()),
+            "sinr_true_db": decision_gamma,
+            "sinr_hat_db": decision_sinr_hat,
+            "cqi_index": decision_cqi,
+            "sinr_eq_db": last_sinr_eq,
+            "mi_saturated": mi_sat,
+            "tbler": last_tbler,
+            "decoded_bits": last_bits,
             "dropped": dropped,
+            "num_slots": num_tx,
+            "num_retx": max(num_tx - 1, 0),
+            "harq_feedbacks": list(harq_seq),
+            "decision_slot": decision_slot,
         }
-
-        self._last_ack = ack
-        self._t += 1
-        truncated = self._t >= self.num_slots
-        return self._obs(), float(reward), False, truncated, self._info(outcome)
+        return (
+            self._state(next_cqi),
+            float(reward),
+            False,
+            truncated,
+            self._info(outcome, cqi_index=next_cqi),
+        )
 
     @classmethod
     def from_config(cls, cfg, phy_abs=None):
-        # yaml keys -> constructor kwargs
         keys = (
             "num_slots",
             "mcs_table_index",
@@ -289,11 +415,16 @@ class DownlinkLAEnv(gym.Env):
             "sinr_mean_change_prob",
             "cqi_noise_std_db",
             "cqi_delay_slots",
+            "cqi_report_period",
+            "ack_delay_slots",
+            "cqi_bler_target",
             "mi_combining_rho",
             "harq_max_retx",
             "drop_penalty",
-            "obs_num_lags",
-            "obs_bler_window",
+            "state_num_lags",
         )
         kwargs = {k: cfg[k] for k in keys if k in cfg}
+        # backward-compatible yaml key
+        if "state_num_lags" not in kwargs and "obs_num_lags" in cfg:
+            kwargs["state_num_lags"] = cfg["obs_num_lags"]
         return cls(phy_abs=phy_abs, **kwargs)
