@@ -5,12 +5,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 import yaml
-from sionna.phy import config as sionna_config
 from sionna.sys import PHYAbstraction
 
-from la_env import DownlinkLAEnv
+from la_env import DownlinkLAEnv, seed_phy
 from policies import EpsilonGreedyPolicy, make_baseline_policy
 
 
@@ -41,25 +39,26 @@ def rollout(env, policy, seed):
 
         next_state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
+        out = info["outcome"]
 
         log["state"].append(state)
         log["action"].append(action)
         log["reward"].append(reward)
         log["next_state"].append(next_state)
         log["done"].append(done)
-        log["mcs_used"].append(info["mcs_used"])
-        log["ack"].append(info["ack"])
-        log["tb_success"].append(info["tb_success"])
-        log["dropped"].append(info["dropped"])
-        log["num_slots"].append(info["num_slots"])
-        log["num_retx"].append(info["num_retx"])
+        log["mcs_used"].append(out["mcs_used"])
+        log["ack"].append(out["ack"])
+        log["tb_success"].append(out["tb_success"])
+        log["dropped"].append(out["dropped"])
+        log["num_slots"].append(out["num_slots"])
+        log["num_retx"].append(out["num_retx"])
         log["delta_tau"].append(delta_tau)
-        log["sinr_true_db"].append(info["sinr_true_db"])
+        log["sinr_true_db"].append(out["sinr_true_db"])
         log["sinr_hat_db"].append(sinr_hat)
         log["cqi_index"].append(cqi_index)
         log["cqi_norm"].append(cqi_norm)
-        log["tbler"].append(info["tbler"])
-        log["decoded_bits"].append(info["decoded_bits"])
+        log["tbler"].append(out["tbler"])
+        log["decoded_bits"].append(out["decoded_bits"])
         state = next_state
 
     return {k: np.asarray(v) for k, v in log.items()}
@@ -67,7 +66,6 @@ def rollout(env, policy, seed):
 
 def metrics_from_rollout(res, num_slots):
     n = len(res["ack"])
-    slot_sum = max(int(res["num_slots"].sum()), 1)
     return {
         "return": float(res["reward"].sum()),
         "throughput": float(res["reward"].sum() / num_slots),
@@ -209,7 +207,13 @@ def main():
     if args.no_npz:
         cfg["save_npz"] = False
 
-    eval_seeds = [int(s) for s in args.eval_seeds] if args.eval_seeds else [int(cfg["seed"])]
+    eval_seeds = (
+        [int(s) for s in args.eval_seeds]
+        if args.eval_seeds
+        else [int(s) for s in cfg["eval_seeds"]]
+        if cfg.get("eval_seeds")
+        else [int(cfg["seed"])]
+    )
     num_slots = int(cfg["num_slots"])
     bler_target = float(cfg["bler_target"])
     olla_step_up_db = cfg.get("olla_step_up_db")
@@ -238,8 +242,7 @@ def main():
     plot_seed = eval_seeds[0]
 
     for eval_seed in eval_seeds:
-        sionna_config.seed = eval_seed
-        torch.manual_seed(eval_seed)
+        np.random.seed(eval_seed)
         print(f"\n--- seed {eval_seed} ---")
 
         results = {}
@@ -251,6 +254,7 @@ def main():
                     policy = EpsilonGreedyPolicy(base, n_actions, epsilon=eps, seed=eval_seed)
                     label = f"{name}_eps{eps:g}"
                 print(f"=== Rollout: {label} ===")
+                seed_phy(eval_seed)
                 res = rollout(env, policy, seed=eval_seed)
                 m = summarize(label, res, bler_target, num_slots)
                 results[label] = res
@@ -268,7 +272,11 @@ def main():
             for label, res in results.items():
                 path = out_dir / f"la_{label}_seed{eval_seed}.npz"
                 np.savez_compressed(
-                    path, **res, bler_target=bler_target, seed=eval_seed, num_slots=num_slots
+                    path,
+                    **res,
+                    bler_target=bler_target,
+                    seed=eval_seed,
+                    episode_num_slots=num_slots,
                 )
                 print(f"Saved {len(res['action'])} TB transitions -> {path}")
 

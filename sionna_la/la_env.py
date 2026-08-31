@@ -3,9 +3,11 @@
 # One Gym step = one transport block (initial MCS + internal retx slots).
 # Agent state: [cqi^(0..L-1), m^(1..L), b^(1..L)]  (default L=3 → 9-dim)
 #   cqi^(0)     current reported CQI / 15
-#   cqi^(1..L-1) past decision CQIs (most recent first); unseen = -1
-#   m, b        past decisions (MCS norm, first-tx ACK); unseen = -1
-# True SINR γ is logged in info["sinr_true_db"] (not part of agent state).
+#   cqi^(1..L-1) past decision CQIs (L-1 slots; most recent first); unseen = -1
+#   m, b        past decisions (MCS norm, first-tx ACK), L slots; unseen = -1
+# True SINR γ is not in the agent state.
+# info (next decision): cqi_index, harq_feedbacks (delay-elapsed first-ACKs), slot, ...
+# info["outcome"] (TB just finished): mcs, tbler, harq_seq, decision CQI/SINR, ...
 # delta_tau stays in info only (not in state)
 # γ̂ = delayed + noisy SINR (UE measurement before CQI quantization)
 # Reward: SE/num_tx if TB ACKs, -drop_penalty if dropped, 0 on intermediate NACKs
@@ -17,29 +19,40 @@ import gymnasium as gym
 import numpy as np
 import torch
 from gymnasium import spaces
+from sionna.phy import config as sionna_config
 from sionna.phy.nr.utils import decode_mcs_index
 from sionna.phy.utils import db_to_lin
 from sionna.sys import PHYAbstraction
 
 from channel import add_cqi_noise, generate_sinr_db_trace
-from cqi import build_bs_cqi_trace, build_cqi_to_mcs, normalize_cqi, report_cqi
+from cqi import build_cqi_to_mcs, normalize_cqi, report_cqi
 from harq import SNR_GRID_MAX_DB, HarqProcess, mod_from_qm
 
 _MCS_RANGE = {1: (3, 28), 2: (2, 27)}
 _UNSEEN = -1.0
 
 
+def seed_phy(seed):
+    # Sionna PHYAbstraction RNG + torch; call before each comparable rollout
+    if seed is None:
+        return
+    seed = int(seed)
+    sionna_config.seed = seed
+    torch.manual_seed(seed)
+
+
 class DecisionHistory:
-    # past decision CQI / MCS / first-attempt ACK
+    # past decision CQI (L-1) / MCS / first-attempt ACK (L each)
 
     def __init__(self, num_lags=3):
-        self.num_lags = num_lags
+        self.num_lags = max(1, int(num_lags))
         self.reset()
 
     def reset(self):
-        self.cqi = deque([_UNSEEN] * self.num_lags, maxlen=self.num_lags)
-        self.mcs = deque([_UNSEEN] * self.num_lags, maxlen=self.num_lags)
-        self.ack = deque([_UNSEEN] * self.num_lags, maxlen=self.num_lags)
+        n = self.num_lags
+        self.cqi = deque([_UNSEEN] * (n - 1), maxlen=n - 1)
+        self.mcs = deque([_UNSEEN] * n, maxlen=n)
+        self.ack = deque([_UNSEEN] * n, maxlen=n)
 
     def push(self, cqi_n, mcs_norm, first_ack):
         self.cqi.appendleft(float(cqi_n))
@@ -65,7 +78,6 @@ class DownlinkLAEnv(gym.Env):
         sinr_mean_change_prob=0.0, # probability of changing the mean SINR  
         cqi_noise_std_db=1.5,
         cqi_delay_slots=None,
-        cqi_report_period=1,
         cqi_bler_target=0.1,
         ack_delay_slots=0,
         mi_combining_rho=0.9, # discount ratio for MI accumulation
@@ -92,7 +104,6 @@ class DownlinkLAEnv(gym.Env):
         self.sinr_mean_change_prob = sinr_mean_change_prob
         self.cqi_noise_std_db = cqi_noise_std_db
         self.cqi_delay_slots = cqi_delay_slots
-        self.cqi_report_period = max(1, int(cqi_report_period))
         self.cqi_bler_target = float(cqi_bler_target)
         self.ack_delay_slots = max(0, int(ack_delay_slots))
         self.drop_penalty = drop_penalty
@@ -121,7 +132,6 @@ class DownlinkLAEnv(gym.Env):
         self._num_re_t = torch.tensor([self.num_allocated_re], dtype=torch.int32)
         self._sinr_true_db = np.zeros(self.num_slots)
         self._sinr_fb_db = np.zeros(self.num_slots)
-        self._bs_cqi = np.zeros(self.num_slots, dtype=np.int32)
         self._delay_used = 0
         self._t = 0
         self._last_decision_slot = 0
@@ -153,9 +163,6 @@ class DownlinkLAEnv(gym.Env):
         return float(self._sinr_true_db[idx])
 
     def _report_cqi_at(self, slot):
-        idx = min(max(int(slot), 0), self.num_slots - 1)
-        if self.cqi_report_period > 1:
-            return int(self._bs_cqi[idx])
         sinr_lin = db_to_lin(
             torch.tensor([self._sinr_hat_db(slot)], dtype=torch.float32)
         )
@@ -171,22 +178,21 @@ class DownlinkLAEnv(gym.Env):
 
     def _drain_feedback(self, now_slot):
         # ACK/NACK + delayed history push (BS learns first_ack at delivery_slot)
-        self._pending_harq = [-1]
+        drained = []
         while self._fb_queue and self._fb_queue[0][0] <= now_slot:
             _, first_ack, cqi_n, mcs_norm = self._fb_queue.popleft()
             self.hist.push(cqi_n, mcs_norm, int(first_ack))
-            self._pending_harq = [int(first_ack)]
+            drained.append(int(first_ack))
+        self._pending_harq = drained if drained else [-1]
 
     def _state(self, cqi_index=None):
         # agent state at current decision slot _t
         if cqi_index is None:
             cqi_index = self._report_cqi_at(self._t)
         cqi_n = normalize_cqi(cqi_index)
-        n = self.hist.num_lags
-        # [cqi_t, cqi_{t-1}, ..., cqi_{t-L+1}]
-        cqi_hist = [cqi_n, *list(self.hist.cqi)[: n - 1]]
+        # [cqi_t, past CQI x (L-1), past MCS x L, past ACK x L]
         return np.array(
-            [*cqi_hist, *self.hist.mcs, *self.hist.ack],
+            [cqi_n, *self.hist.cqi, *self.hist.mcs, *self.hist.ack],
             dtype=np.float32,
         )
 
@@ -198,13 +204,9 @@ class DownlinkLAEnv(gym.Env):
             # true channel (hidden from agent state vector)
             "sinr_true_db": self._gamma_at(self._t),
             # sinr_hat kept for logging; baselines use cqi_index (discrete) only
-            "sinr_eff_lin": db_to_lin(
-                torch.tensor([sinr_hat_db], dtype=torch.float32)
-            ),
             "sinr_hat_db": sinr_hat_db,
             "cqi_index": int(cqi_index),
             "cqi_norm": normalize_cqi(cqi_index),
-            "num_allocated_re": self._num_re_t,
             "harq_feedbacks": list(self._pending_harq),
             "mcs_table_index": self.mcs_table_index,
             "mcs_category": self.mcs_category,
@@ -218,11 +220,11 @@ class DownlinkLAEnv(gym.Env):
                 else float(self._t - self._last_decision_slot)
             ),
             "cqi_delay_slots": self._delay_used,
-            "cqi_report_period": self.cqi_report_period,
             "ack_delay_slots": self.ack_delay_slots,
         }
-        if outcome:
-            info.update(outcome)
+        # TB log lives under outcome so it cannot overwrite next-decision fields
+        if outcome is not None:
+            info["outcome"] = outcome
         return info
 
     def reset(self, *, seed=None, options=None):
@@ -245,27 +247,6 @@ class DownlinkLAEnv(gym.Env):
             delay_slots=self.cqi_delay_slots,
             seed=None if seed is None else seed + 1,
         )
-
-        self._sinr_fb_db, self._delay_used = add_cqi_noise(
-            self._sinr_true_db,
-            noise_std_db=self.cqi_noise_std_db,
-            delay_slots=self.cqi_delay_slots,
-            seed=None if seed is None else seed + 1,
-        )
-        if self.cqi_report_period > 1:
-            self._bs_cqi, _ = build_bs_cqi_trace(
-                self.phy_abs,
-                self._sinr_fb_db,
-                self._num_re_t,
-                self._cqi_to_mcs,
-                self.cqi_report_period,
-                mcs_table_index=self.mcs_table_index,
-                mcs_category=self.mcs_category,
-                bler_target=self.cqi_bler_target,
-            )
-        else:
-            self._bs_cqi = np.zeros(self.num_slots, dtype=np.int32)
-
         self.harq.reset()
         self.hist.reset()
         self._t = 0
@@ -300,8 +281,6 @@ class DownlinkLAEnv(gym.Env):
         if self._t >= self.num_slots:
             return self._state(), 0.0, False, True, self._info()
 
-        self._drain_feedback(self._t)
-
         decision_slot = self._t
         decision_cqi = self._report_cqi_at(self._t)
         decision_cqi_n = normalize_cqi(decision_cqi)
@@ -316,6 +295,7 @@ class DownlinkLAEnv(gym.Env):
         harq_seq = []
         first_ack = None
         dropped = False
+        truncated_mid_tb = False
         num_tx = 0
         last_tbler = 0.0
         last_bits = 0
@@ -328,7 +308,7 @@ class DownlinkLAEnv(gym.Env):
             harq_seq.append(ack)
             num_tx += 1
             last_tbler, last_bits, last_sinr_eq = tbler, bits, sinr_eq
-            mi_sat = sinr_eq >= SNR_GRID_MAX_DB - 1e-6 # check if the MI is saturated
+            mi_sat = sinr_eq >= SNR_GRID_MAX_DB - 1e-6  # MI grid saturation
 
             if first_ack is None:
                 first_ack = ack
@@ -345,14 +325,14 @@ class DownlinkLAEnv(gym.Env):
                 reward = -self.drop_penalty
                 break
         else:
-            # truncated mid-TB
-            dropped = True
+            # episode time limit mid-TB: not a HARQ drop (reward stays 0)
+            truncated_mid_tb = True
             if self.harq.mcs is not None:
                 self.harq.reset()
 
         mcs_norm = (mcs_used - self.mcs_min) / self._mcs_span
         first_ack_i = int(first_ack or 0)
-        if self.ack_delay_slots > 0:
+        if harq_seq:
             self._fb_queue.append(
                 (
                     self._t + self.ack_delay_slots,
@@ -361,20 +341,20 @@ class DownlinkLAEnv(gym.Env):
                     mcs_norm,
                 )
             )
-        else:
-            self.hist.push(decision_cqi_n, mcs_norm, first_ack_i)
-            self._pending_harq = [first_ack_i] if harq_seq else [-1]
 
         self._last_decision_slot = decision_slot
         self._ever_decided = True
 
         truncated = self._t >= self.num_slots
-        next_cqi = self._report_cqi_at(self._t) if not truncated else decision_cqi
+        if not truncated:
+            self._drain_feedback(self._t)
+            next_cqi = self._report_cqi_at(self._t)
+        else:
+            next_cqi = decision_cqi
         outcome = {
             "ack": int(first_ack or 0),  # first-attempt ACK
             "tb_success": int(reward > 0),
             "mcs_used": mcs_used,
-            "signalled_mcs": mcs_used,
             "qm": qm,
             "coderate": coderate,
             "modulation": mod_from_qm(qm),
@@ -386,6 +366,7 @@ class DownlinkLAEnv(gym.Env):
             "tbler": last_tbler,
             "decoded_bits": last_bits,
             "dropped": dropped,
+            "truncated_mid_tb": truncated_mid_tb,
             "num_slots": num_tx,
             "num_retx": max(num_tx - 1, 0),
             "harq_feedbacks": list(harq_seq),
@@ -415,7 +396,6 @@ class DownlinkLAEnv(gym.Env):
             "sinr_mean_change_prob",
             "cqi_noise_std_db",
             "cqi_delay_slots",
-            "cqi_report_period",
             "ack_delay_slots",
             "cqi_bler_target",
             "mi_combining_rho",
@@ -424,7 +404,4 @@ class DownlinkLAEnv(gym.Env):
             "state_num_lags",
         )
         kwargs = {k: cfg[k] for k in keys if k in cfg}
-        # backward-compatible yaml key
-        if "state_num_lags" not in kwargs and "obs_num_lags" in cfg:
-            kwargs["state_num_lags"] = cfg["obs_num_lags"]
         return cls(phy_abs=phy_abs, **kwargs)

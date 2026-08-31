@@ -1,4 +1,5 @@
 # 5G DL single-UE link adaptation (Sionna PHYAbstraction)
+# Env / baseline / train / dqn 모두 이 파일에서 읽고, CLI가 있으면 덮어씀.
 
 num_slots: 400
 seed: 0
@@ -22,14 +23,12 @@ sinr_mean_change_prob: 0.0
 cqi_noise_std_db: 1.5
 # null → randint(1, 5) = {1,2,3,4} once per episode; int → fixed delay
 cqi_delay_slots: null
-# reported CQI = max q s.t. TBLER(MCS(q), SINR_hat) <= target (via PHYAbstraction)
+# reported CQI = max q s.t. TBLER(MCS(q), SINR_hat) <= target (every slot)
 cqi_bler_target: 0.1
-# BS holds period-average CQI between reports (LTE ~40 ms @ 1 ms/slot -> 40)
-cqi_report_period: 40
 # first-tx ACK/NACK visible to BS after TB finish + this many slots
 ack_delay_slots: 8
 # srsRAN-style OLLA SNR step (dB); step_down = step_up * (1/BLER - 1)
-olla_step_up_db: 0.001
+olla_step_up_db: 0.1
 
 # HARQ-IR (MI accumulation)
 mi_combining_rho: 0.9
@@ -39,8 +38,28 @@ drop_penalty: 6.0
 # State history (decision-step): [cqi x L, m x L, b x L]
 state_num_lags: 3
 
+# run_la_sim: null → [seed]
+eval_seeds: null
 collect_epsilons: [0.0]
 
 out_dir: outputs
 save_plot: true
 save_npz: true
+
+# train_dqn.py (CLI overrides these)
+train:
+  episodes: 400
+  log_every: 50
+  eval_seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+dqn:
+  hidden: 256
+  buffer_size: 100000
+  batch_size: 64
+  gamma: 0.99
+  lr: 0.001
+  target_sync: 200
+  epsilon_start: 1.0
+  epsilon_end: 0.01
+  # null → max(episodes * 100, 5000)
+  epsilon_decay_steps: null

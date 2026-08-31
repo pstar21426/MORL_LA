@@ -158,39 +158,3 @@ def mcs_from_sinr_db(
         ):
             best = mcs
     return best
-
-
-def build_bs_cqi_trace(
-    phy_abs,
-    sinr_fb_db,
-    num_allocated_re,
-    cqi_to_mcs,
-    report_period,
-    mcs_table_index=1,
-    mcs_category=1,
-    bler_target=0.1,
-):
-    # UE instant CQI per slot, then BS holds period-average report until next period
-    num_slots = int(len(sinr_fb_db))
-    instant = np.zeros(num_slots, dtype=np.int32)
-    for t in range(num_slots):
-        sinr_lin = db_to_lin(
-            torch.tensor([float(sinr_fb_db[t])], dtype=torch.float32)
-        )
-        instant[t] = report_cqi(
-            phy_abs,
-            sinr_lin,
-            num_allocated_re,
-            cqi_to_mcs,
-            mcs_table_index=mcs_table_index,
-            mcs_category=mcs_category,
-            bler_target=bler_target,
-        )
-
-    bs_cqi = np.zeros(num_slots, dtype=np.int32)
-    period = max(1, int(report_period))
-    for k in range(0, num_slots, period):
-        window = instant[k : min(k + period, num_slots)]
-        rep = int(np.clip(int(round(float(np.mean(window)))), 0, CQI_MAX))
-        bs_cqi[k : min(k + period, num_slots)] = rep
-    return bs_cqi, instant

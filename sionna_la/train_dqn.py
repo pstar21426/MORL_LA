@@ -6,11 +6,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
-from sionna.phy import config as sionna_config
 from sionna.sys import PHYAbstraction
 
 from dqn import DQNAgent, Transition
-from la_env import DownlinkLAEnv
+from la_env import DownlinkLAEnv, seed_phy
 from policies import make_baseline_policy
 
 
@@ -42,18 +41,19 @@ def run_episode(env, agent, seed, *, train=True, greedy=False):
                     action=action,
                     reward=float(reward),
                     next_state=next_state,
-                    done=done,
+                    terminated=bool(terminated),
                 )
             )
             agent.train_step()
 
+        out = info["outcome"]
         ep_return += reward
         n_tbs += 1
-        n_ack += int(info["ack"])
-        n_slots += int(info["num_slots"])
-        n_tb_success += int(info["tb_success"])
-        mcs_sum += float(info["mcs_used"])
-        drops += int(info["dropped"])
+        n_ack += int(out["ack"])
+        n_slots += int(out["num_slots"])
+        n_tb_success += int(out["tb_success"])
+        mcs_sum += float(out["mcs_used"])
+        drops += int(out["dropped"])
         state = next_state
 
     return {
@@ -84,13 +84,14 @@ def rollout_rule(env, policy, seed):
         action = policy(state, info)
         state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
+        out = info["outcome"]
         ep_return += reward
         n_tbs += 1
-        n_ack += int(info["ack"])
-        n_slots += int(info["num_slots"])
-        n_tb_success += int(info["tb_success"])
-        mcs_sum += float(info["mcs_used"])
-        drops += int(info["dropped"])
+        n_ack += int(out["ack"])
+        n_slots += int(out["num_slots"])
+        n_tb_success += int(out["tb_success"])
+        mcs_sum += float(out["mcs_used"])
+        drops += int(out["dropped"])
 
     return {
         "return": ep_return,
@@ -141,21 +142,57 @@ def main():
         type=Path,
         default=Path(__file__).resolve().parent / "configs" / "downlink_la.yaml",
     )
-    p.add_argument("--episodes", type=int, default=1000)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--eval-seeds", type=int, nargs="+", default=list(range(10)))
-    p.add_argument("--hidden", type=int, default=256)
-    p.add_argument("--buffer-size", type=int, default=100_000)
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--epsilon-end", type=float, default=0.01)
-    p.add_argument("--log-every", type=int, default=50)
+    p.add_argument("--episodes", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--eval-seeds", type=int, nargs="+", default=None)
+    p.add_argument("--hidden", type=int, default=None)
+    p.add_argument("--buffer-size", type=int, default=None)
+    p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--gamma", type=float, default=None)
+    p.add_argument("--lr", type=float, default=None)
+    p.add_argument("--epsilon-start", type=float, default=None)
+    p.add_argument("--epsilon-end", type=float, default=None)
+    p.add_argument("--log-every", type=int, default=None)
     p.add_argument("--out-dir", type=Path, default=None)
     args = p.parse_args()
 
     cfg = load_config(args.config)
-    seed = args.seed
-    sionna_config.seed = seed
-    torch.manual_seed(seed)
+    train_cfg = cfg.get("train") or {}
+    dqn_cfg = cfg.get("dqn") or {}
+
+    seed = int(args.seed if args.seed is not None else cfg.get("seed", 0))
+    episodes = int(
+        args.episodes if args.episodes is not None else train_cfg.get("episodes", 1000)
+    )
+    log_every = int(
+        args.log_every if args.log_every is not None else train_cfg.get("log_every", 50)
+    )
+    hidden = int(args.hidden if args.hidden is not None else dqn_cfg.get("hidden", 256))
+    buffer_size = int(
+        args.buffer_size
+        if args.buffer_size is not None
+        else dqn_cfg.get("buffer_size", 100_000)
+    )
+    batch_size = int(
+        args.batch_size if args.batch_size is not None else dqn_cfg.get("batch_size", 64)
+    )
+    gamma = float(args.gamma if args.gamma is not None else dqn_cfg.get("gamma", 0.99))
+    lr = float(args.lr if args.lr is not None else dqn_cfg.get("lr", 1e-3))
+    epsilon_start = float(
+        args.epsilon_start
+        if args.epsilon_start is not None
+        else dqn_cfg.get("epsilon_start", 1.0)
+    )
+    epsilon_end = float(
+        args.epsilon_end
+        if args.epsilon_end is not None
+        else dqn_cfg.get("epsilon_end", 0.01)
+    )
+    decay_cfg = dqn_cfg.get("epsilon_decay_steps")
+    decay_steps = int(decay_cfg) if decay_cfg is not None else max(episodes * 100, 5_000)
+
+    np.random.seed(seed)
+    seed_phy(seed)
     bler_target = float(cfg["bler_target"])
     olla_step_up_db = cfg.get("olla_step_up_db")
 
@@ -169,21 +206,24 @@ def main():
     state_dim = int(np.prod(env.state_space.shape))
     n_actions = env.action_space.n
 
-    decay_steps = max(args.episodes * 100, 5_000)
     agent = DQNAgent(
         state_dim,
         n_actions,
-        hidden=args.hidden,
-        buffer_size=args.buffer_size,
-        batch_size=args.batch_size,
-        epsilon_end=args.epsilon_end,
+        hidden=hidden,
+        gamma=gamma,
+        lr=lr,
+        buffer_size=buffer_size,
+        batch_size=batch_size,
+        target_sync=int(dqn_cfg.get("target_sync", 200)),
+        epsilon_start=epsilon_start,
+        epsilon_end=epsilon_end,
         epsilon_decay_steps=decay_steps,
     )
 
     print(
-        f"=== DQN train ({args.episodes} eps) state={state_dim} "
-        f"actions={n_actions} hidden={args.hidden} "
-        f"buffer={args.buffer_size} eps_end={args.epsilon_end} ==="
+        f"=== DQN train ({episodes} eps) state={state_dim} "
+        f"actions={n_actions} hidden={hidden} "
+        f"buffer={buffer_size} eps_end={epsilon_end} ==="
     )
     train_log = {
         "episode": [],
@@ -194,7 +234,7 @@ def main():
         "epsilon": [],
     }
 
-    for ep in range(args.episodes):
+    for ep in range(episodes):
         m = run_episode(env, agent, seed=seed + ep, train=True)
         train_log["episode"].append(ep + 1)
         train_log["return"].append(m["return"])
@@ -203,7 +243,7 @@ def main():
         train_log["first_tx_bler"].append(m["first_tx_bler"])
         train_log["epsilon"].append(agent.epsilon)
 
-        if (ep + 1) % args.log_every == 0 or ep == 0:
+        if (ep + 1) % log_every == 0 or ep == 0:
             print(
                 f"  ep {ep + 1:4d} | return={m['return']:.1f} | "
                 f"throughput={m['throughput']:.4f} | eps={agent.epsilon:.3f} | "
@@ -220,33 +260,33 @@ def main():
             "q": agent.q.state_dict(),
             "state_dim": state_dim,
             "n_actions": n_actions,
-            "hidden": args.hidden,
-            "episodes": args.episodes,
-            "epsilon_end": args.epsilon_end,
+            "hidden": hidden,
+            "episodes": episodes,
+            "epsilon_end": epsilon_end,
         },
         ckpt_path,
     )
     print(f"Saved checkpoint -> {ckpt_path}")
 
-    eval_seeds = [int(s) for s in args.eval_seeds]
+    if args.eval_seeds is not None:
+        eval_seeds = [int(s) for s in args.eval_seeds]
+    else:
+        eval_seeds = [int(s) for s in train_cfg.get("eval_seeds", list(range(10)))]
     print(f"\n=== Eval ({len(eval_seeds)} seeds: {eval_seeds}) ===")
+
+    illa_pol = make_baseline_policy("illa", env, bler_target=bler_target)
+    olla_pol = make_baseline_policy(
+        "olla", env, bler_target=bler_target, olla_step_up_db=olla_step_up_db
+    )
 
     dqn_rows, illa_rows, olla_rows = [], [], []
     for eval_seed in eval_seeds:
-        sionna_config.seed = eval_seed
-        torch.manual_seed(eval_seed)
-
+        seed_phy(eval_seed)
         dqn_m = run_episode(env, agent, seed=eval_seed, train=False, greedy=True)
-        illa_m = rollout_rule(
-            env, make_baseline_policy("illa", env, bler_target=bler_target), eval_seed
-        )
-        olla_m = rollout_rule(
-            env,
-            make_baseline_policy(
-                "olla", env, bler_target=bler_target, olla_step_up_db=olla_step_up_db
-            ),
-            eval_seed,
-        )
+        seed_phy(eval_seed)
+        illa_m = rollout_rule(env, illa_pol, eval_seed)
+        seed_phy(eval_seed)
+        olla_m = rollout_rule(env, olla_pol, eval_seed)
         dqn_rows.append(dqn_m)
         illa_rows.append(illa_m)
         olla_rows.append(olla_m)
@@ -275,9 +315,9 @@ def main():
         olla_throughput=np.asarray([r["throughput"] for r in olla_rows]),
         bler_target=bler_target,
         seed=seed,
-        episodes=args.episodes,
-        hidden=args.hidden,
-        epsilon_end=args.epsilon_end,
+        episodes=episodes,
+        hidden=hidden,
+        epsilon_end=epsilon_end,
     )
     print(f"Saved eval summary -> {eval_path}")
     print("Done.")

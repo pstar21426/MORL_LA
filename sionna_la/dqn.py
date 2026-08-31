@@ -10,13 +10,6 @@ import torch.nn as nn
 import torch.optim as optim
 
 
-def preprocess_state(state: np.ndarray) -> np.ndarray:
-    """Map unseen (-1) history slots to 0 for the network."""
-    s = np.asarray(state, dtype=np.float32).copy()
-    s[s < 0.0] = 0.0
-    return s
-
-
 class QNet(nn.Module):
     def __init__(self, state_dim: int, n_actions: int, hidden: int = 256):
         super().__init__()
@@ -38,7 +31,7 @@ class Transition:
     action: int
     reward: float
     next_state: np.ndarray
-    done: bool
+    terminated: bool
 
 
 class ReplayBuffer:
@@ -54,11 +47,13 @@ class ReplayBuffer:
     def sample(self, batch_size: int) -> Tuple[np.ndarray, ...]:
         idx = np.random.choice(len(self.buf), batch_size, replace=False)
         batch = [self.buf[i] for i in idx]
-        states = np.stack([preprocess_state(t.state) for t in batch])
+        states = np.stack([np.asarray(t.state, dtype=np.float32) for t in batch])
         actions = np.asarray([t.action for t in batch], dtype=np.int64)
         rewards = np.asarray([t.reward for t in batch], dtype=np.float32)
-        next_states = np.stack([preprocess_state(t.next_state) for t in batch])
-        dones = np.asarray([t.done for t in batch], dtype=np.float32)
+        next_states = np.stack(
+            [np.asarray(t.next_state, dtype=np.float32) for t in batch]
+        )
+        dones = np.asarray([t.terminated for t in batch], dtype=np.float32)
         return states, actions, rewards, next_states, dones
 
 
@@ -106,7 +101,9 @@ class DQNAgent:
     def select_action(self, state: np.ndarray, *, greedy: bool = False) -> int:
         if not greedy and np.random.random() < self.epsilon:
             return int(np.random.randint(0, self.n_actions))
-        s = torch.from_numpy(preprocess_state(state)).unsqueeze(0).to(self.device)
+        s = torch.from_numpy(np.asarray(state, dtype=np.float32)).unsqueeze(0).to(
+            self.device
+        )
         with torch.no_grad():
             q = self.q(s)
         return int(q.argmax(dim=1).item())

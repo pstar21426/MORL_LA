@@ -23,10 +23,9 @@ class IllaPolicy:
 
     name = "illa"
 
-    def __init__(self, mcs_min, mcs_max, mcs_table_index=1, bler_target=0.1):
+    def __init__(self, mcs_min, mcs_max, mcs_table_index=1):
         self.mcs_min = int(mcs_min)
         self.mcs_max = int(mcs_max)
-        self.bler_target = float(bler_target)
         self._cqi_to_mcs = build_cqi_to_mcs(
             self.mcs_min, self.mcs_max, mcs_table_index=mcs_table_index
         )
@@ -73,7 +72,7 @@ class OllaPolicy:
         self.sinr_min_db = float(sinr_min_db)
         self.sinr_max_db = float(sinr_max_db)
 
-        self.step_up_db = 0.001 if step_up_db is None else float(step_up_db)
+        self.step_up_db = 0.1 if step_up_db is None else float(step_up_db)
         if step_down_db is None:
             self.step_down_db = self.step_up_db * (1.0 / self.bler_target - 1.0)
         else:
@@ -99,8 +98,10 @@ class OllaPolicy:
 
     def __call__(self, state, info):
         fb_seq = info.get("harq_feedbacks") or [-1]
-        if fb_seq and fb_seq[0] != -1:
-            if fb_seq[0] == 1:
+        for fb in fb_seq:
+            if int(fb) == -1:
+                continue
+            if int(fb) == 1:
                 self._offset_db += self.step_up_db
             else:
                 self._offset_db -= self.step_down_db
@@ -152,7 +153,6 @@ def make_baseline_policy(name, env, bler_target=0.1, olla_step_up_db=None):
             mcs_min=env.mcs_min,
             mcs_max=env.mcs_max,
             mcs_table_index=env.mcs_table_index,
-            bler_target=bler_target,
         )
     if name == "olla":
         kwargs = dict(
