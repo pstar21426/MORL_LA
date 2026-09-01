@@ -8,12 +8,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import yaml
-from sionna.phy import config as sionna_config
 from sionna.sys import PHYAbstraction
 
 from dqn import DQNAgent
-from la_env import DownlinkLAEnv
+from la_env import DownlinkLAEnv, seed_phy
 from train_dqn import load_config
 
 
@@ -81,8 +79,7 @@ def dqn_rollout(env, ckpt_path, seed, hidden=256):
     agent.q.load_state_dict(ckpt["q"])
     agent.q.eval()
 
-    sionna_config.seed = seed
-    torch.manual_seed(seed)
+    seed_phy(seed)
     state, _ = env.reset(seed=seed)
     rewards, slots = [], []
 
@@ -92,7 +89,7 @@ def dqn_rollout(env, ckpt_path, seed, hidden=256):
         state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         rewards.append(float(reward))
-        slots.append(int(info["num_slots"]))
+        slots.append(int(info["outcome"]["num_slots"]))
 
     return {"reward": np.asarray(rewards), "num_slots": np.asarray(slots)}
 

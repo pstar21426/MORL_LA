@@ -74,10 +74,6 @@ class HarqProcess:
         self.mcs = None
         self.qm = None
 
-    @property
-    def is_retransmission(self):
-        return self.k > 0
-
     def start_transmission(self, mcs_index, qm):
         self.mcs = int(mcs_index)
         self.qm = int(qm)
@@ -97,9 +93,3 @@ class HarqProcess:
             return True
         self.k += 1
         return False
-
-    def signalled_mcs(self, mcs_table_index=1):
-        # reserved MCS for retx signaling (logging only; not fed to Sionna)
-        if mcs_table_index == 2:
-            return 28 + (int(self.qm) // 2 - 1)
-        return 29 + (int(self.qm) // 2 - 1)
