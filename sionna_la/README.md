@@ -31,9 +31,9 @@ a = policy(state, info)          # ILLA / OLLA / RL
 state, r, term, trunc, info = env.step(a)
 ```
 
-State (L=`state_num_lags`, default 3): `[cqi×L, m×L, b×L]`  
-- `cqi`: 현재 1 + 과거 decision CQI L−1 (norm)  
-- `m` / `b`: 과거 MCS (norm) / first-tx ACK (각 L개)  
+State (L=`state_num_lags`, default 3): `[cqi_n, past_cqi×L, m×L, b×L]` → **3L+1** dims (10)  
+- `cqi_n` + `past_cqi`: decision-time CQI at n, n−1, …, n−L (norm)  
+- `m` / `b`: past MCS (norm) / first-tx ACK (각 L개); unseen = −1  
 `delta_tau`는 `info`에만 있음.  
 True SINR은 `info["sinr_true_db"]`.  
 TB 로그는 `info["outcome"]` (HARQ drop은 `dropped`, 에피소드 끝 mid-TB는 `truncated_mid_tb`).

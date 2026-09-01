@@ -99,11 +99,15 @@ class CheckReport:
 
 
 def _state_slices(L: int):
-    """Return index slices for [cqi_t, past_cqi(L-1), past_m(L), past_b(L)]."""
-    i_cqi_p = 1 + (L - 1)
+    """Return index slices for [cqi_t, past_cqi(L), past_m(L), past_b(L)]."""
+    i_cqi_p = 1 + L
     i_m = i_cqi_p + L
     i_b = i_m + L
     return slice(0, 1), slice(1, i_cqi_p), slice(i_cqi_p, i_m), slice(i_m, i_b)
+
+
+def _state_dim(L: int) -> int:
+    return 1 + 3 * L
 
 
 def rollout_detailed(env: DownlinkLAEnv, policy, seed: int) -> dict:
@@ -212,7 +216,7 @@ def check_invariants(log: dict, tol: float = 1e-5) -> CheckReport:
 
 
 def _push_hist(hist_cqi, hist_m, hist_b, cqi_n, m_norm, ack, L):
-    hist_cqi = [cqi_n] + hist_cqi[: L - 2]
+    hist_cqi = [cqi_n] + hist_cqi[: L - 1]
     hist_m = [m_norm] + hist_m[: L - 1]
     hist_b = [float(ack)] + hist_b[: L - 1]
     return hist_cqi, hist_m, hist_b
@@ -224,12 +228,12 @@ def simulate_expected_states(log: dict) -> np.ndarray:
     ack_delay = int(log["ack_delay"])
     n = len(log["state"])
 
-    hist_cqi = [_UNSEEN] * max(L - 1, 0)
+    hist_cqi = [_UNSEEN] * L
     hist_m = [_UNSEEN] * L
     hist_b = [_UNSEEN] * L
     fb_queue: list[tuple[int, int, float, float]] = []
 
-    expected = np.full((n, 3 * L), _UNSEEN, dtype=np.float64)
+    expected = np.full((n, _state_dim(L)), _UNSEEN, dtype=np.float64)
 
     for i in range(n):
         slot = int(log["decision_slot"][i])

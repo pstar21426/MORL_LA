@@ -110,7 +110,6 @@ def calibrate_cqi_to_sinr_db(
     sinr_min_db=-15.0,
     sinr_max_db=35.0,
 ):
-    # SNR [dB] s.t. TBLER(MCS(CQI), SNR) ~= bler_target (OLLA inner mapping)
     out = {0: float(sinr_min_db)}
     for q in range(1, CQI_MAX + 1):
         mcs = int(cqi_to_mcs[q])

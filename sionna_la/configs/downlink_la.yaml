@@ -35,7 +35,7 @@ mi_combining_rho: 0.9
 harq_max_retx: 2
 drop_penalty: 6.0
 
-# State history (decision-step): [cqi x L, m x L, b x L]
+# State history (decision-step): [cqi_n, past_cqi×L, m×L, b×L]
 state_num_lags: 3
 
 # run_la_sim: null → [seed]

@@ -1,10 +1,10 @@
 # Gym env: decision-step 5G DL LA (Sionna PHYAbstraction + HARQ-IR)
 #
 # One Gym step = one transport block (initial MCS + internal retx slots).
-# Agent state: [cqi^(0..L-1), m^(1..L), b^(1..L)]  (default L=3 → 9-dim)
-#   cqi^(0)     current reported CQI / 15
-#   cqi^(1..L-1) past decision CQIs (L-1 slots; most recent first); unseen = -1
-#   m, b        past decisions (MCS norm, first-tx ACK), L slots; unseen = -1
+# Agent state: [cqi_n, past_cqi×L, past_m×L, past_b×L]  (default L=3 → 10-dim)
+#   cqi_n       current reported CQI / 15
+#   past_cqi    decision CQIs at n-1..n-L (most recent first); unseen = -1
+#   past_m, b   MCS norm / first-tx ACK at n-1..n-L; unseen = -1
 # True SINR γ is not in the agent state.
 # info (next decision): cqi_index, harq_feedbacks (delay-elapsed first-ACKs), slot, ...
 # info["outcome"] (TB just finished): mcs, tbler, harq_seq, decision CQI/SINR, ...
@@ -42,7 +42,7 @@ def seed_phy(seed):
 
 
 class DecisionHistory:
-    # past decision CQI (L-1) / MCS / first-attempt ACK (L each)
+    # past decision CQI / MCS / first-attempt ACK (L each; aligned by decision index)
 
     def __init__(self, num_lags=3):
         self.num_lags = max(1, int(num_lags))
@@ -50,7 +50,7 @@ class DecisionHistory:
 
     def reset(self):
         n = self.num_lags
-        self.cqi = deque([_UNSEEN] * (n - 1), maxlen=n - 1)
+        self.cqi = deque([_UNSEEN] * n, maxlen=n)
         self.mcs = deque([_UNSEEN] * n, maxlen=n)
         self.ack = deque([_UNSEEN] * n, maxlen=n)
 
@@ -119,11 +119,12 @@ class DownlinkLAEnv(gym.Env):
         )
         self.action_space = spaces.Discrete(self._mcs_span + 1)
 
-        # [cqi x L, m x L, b x L] — CQI/MCS normalized; unseen fills = -1
+        # [cqi_n, past_cqi×L, past_m×L, past_b×L]; unseen = -1, else in [0, 1]
         n = self.hist.num_lags
+        state_dim = 1 + 3 * n
         self.state_space = spaces.Box(
-            low=np.full(3 * n, _UNSEEN, dtype=np.float32),
-            high=np.ones(3 * n, dtype=np.float32),
+            low=np.full(state_dim, _UNSEEN, dtype=np.float32),
+            high=np.ones(state_dim, dtype=np.float32),
             dtype=np.float32,
         )
         # Gymnasium requires this name; same object as state_space
@@ -189,8 +190,9 @@ class DownlinkLAEnv(gym.Env):
         # agent state at current decision slot _t
         if cqi_index is None:
             cqi_index = self._report_cqi_at(self._t)
+        # [cqi_t, past_cqi(L), past_m(L), past_b(L)]
         cqi_n = normalize_cqi(cqi_index)
-        # [cqi_t, past CQI x (L-1), past MCS x L, past ACK x L]
+        # [cqi_t, past CQI x L, past MCS x L, past ACK x L]
         return np.array(
             [cqi_n, *self.hist.cqi, *self.hist.mcs, *self.hist.ack],
             dtype=np.float32,
