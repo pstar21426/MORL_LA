@@ -17,13 +17,13 @@ python check_obs/check_obs.py --dqn --checkpoint outputs/dqn_seed0.pt
 |------|------|
 | `la_env.py` | `DownlinkLAEnv` — dynamics의 단일 진실 공급원 |
 | `channel.py` | AR(1) effective SINR + noisy/delayed CQI |
-| `harq.py` | HARQ-IR: 평균 MI → SNR_eff, BLER은 유효 코드레이트 |
+| `harq.py` | HARQ-IR: 첫 전송은 raw SNR, 재전송은 평균 MI → SNR_eff, 같은 Qm·원래 TBS |
 | `policies.py` | ILLA (CQI→MCS) / OLLA (CQI→SNR+offset→MCS) / ε-greedy |
 | `run_la_sim.py` | ILLA/OLLA 롤아웃 → plot + npz |
 | `train_dqn.py` | 간단 DQN 학습 + ILLA/OLLA 비교 eval |
 | `plot_t_return.py` | slot vs cum return (ILLA/OLLA/DQN, 에피소드 1판) |
 | `plot_dqn_train.py` | DQN 학습 곡선 (episode vs return) |
-| `check_obs/check_obs.py` | 관측/state 검증 (invariant + scatter + ILLA oracle); `--dqn`으로 greedy/ILLA 비교 |
+| `check_obs/check_obs.py` | 관측/state 검증 (CSI delay + state + PHY + ILLA oracle); `--dqn`으로 greedy/ILLA 비교 |
 | `configs/downlink_la.yaml` | 파라미터 |
 
 ```python

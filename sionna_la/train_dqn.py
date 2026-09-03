@@ -18,91 +18,68 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def run_episode(env, agent, seed, *, train=True, greedy=False):
-    state, info = env.reset(seed=seed)
-    ep_return = 0.0
-    n_tbs = 0
-    n_ack = 0
-    n_slots = 0
-    n_tb_success = 0
-    mcs_sum = 0.0
-    drops = 0
+def _metrics(st, num_slots):
+    n = max(st["tbs"], 1)
+    return {
+        "return": st["ret"],
+        "tbs": st["tbs"],
+        "first_tx_bler": 1.0 - st["n_ack"] / n,
+        "tb_fail": 1.0 - st["n_ok"] / n,
+        "mean_mcs": st["mcs_sum"] / n,
+        "mean_slots_tb": st["n_slots"] / n,
+        "throughput": st["ret"] / max(num_slots, 1),
+        "drops": st["drops"],
+    }
 
+
+def _rollout(env, choose_action, seed, on_transition=None):
+    state, info = env.reset(seed=seed)
+    st = dict(ret=0.0, tbs=0, n_ack=0, n_slots=0, n_ok=0, mcs_sum=0.0, drops=0)
     done = False
     while not done:
-        action = agent.select_action(state, greedy=greedy)
+        action = choose_action(state, info)
         next_state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
-
-        if train:
-            agent.push(
-                Transition(
-                    state=state,
-                    action=action,
-                    reward=float(reward),
-                    next_state=next_state,
-                    terminated=bool(terminated),
-                )
-            )
-            agent.train_step()
-
+        if on_transition is not None:
+            on_transition(state, action, reward, next_state, terminated)
         out = info["outcome"]
-        ep_return += reward
-        n_tbs += 1
-        n_ack += int(out["ack"])
-        n_slots += int(out["num_slots"])
-        n_tb_success += int(out["tb_success"])
-        mcs_sum += float(out["mcs_used"])
-        drops += int(out["dropped"])
+        st["ret"] += reward
+        st["tbs"] += 1
+        st["n_ack"] += int(out["ack"])
+        st["n_slots"] += int(out["num_slots"])
+        st["n_ok"] += int(out["tb_success"])
+        st["mcs_sum"] += float(out["mcs_used"])
+        st["drops"] += int(out["dropped"])
         state = next_state
+    return _metrics(st, env.num_slots)
 
-    return {
-        "return": ep_return,
-        "tbs": n_tbs,
-        "first_tx_bler": 1.0 - n_ack / max(n_tbs, 1),
-        "tb_fail": 1.0 - n_tb_success / max(n_tbs, 1),
-        "mean_mcs": mcs_sum / max(n_tbs, 1),
-        "mean_slots_tb": n_slots / max(n_tbs, 1),
-        "throughput": ep_return / max(env.num_slots, 1),
-        "drops": drops,
-    }
+
+def run_episode(env, agent, seed, *, train=True, greedy=False):
+    def on_transition(state, action, reward, next_state, terminated):
+        if not train:
+            return
+        agent.push(
+            Transition(
+                state=state,
+                action=action,
+                reward=float(reward),
+                next_state=next_state,
+                terminated=bool(terminated),
+            )
+        )
+        agent.train_step()
+
+    return _rollout(
+        env,
+        lambda state, _info: agent.select_action(state, greedy=greedy),
+        seed,
+        on_transition=on_transition,
+    )
 
 
 def rollout_rule(env, policy, seed):
-    state, info = env.reset(seed=seed)
     policy.reset()
-    ep_return = 0.0
-    n_tbs = 0
-    n_ack = 0
-    n_slots = 0
-    n_tb_success = 0
-    mcs_sum = 0.0
-    drops = 0
-
-    done = False
-    while not done:
-        action = policy(state, info)
-        state, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
-        out = info["outcome"]
-        ep_return += reward
-        n_tbs += 1
-        n_ack += int(out["ack"])
-        n_slots += int(out["num_slots"])
-        n_tb_success += int(out["tb_success"])
-        mcs_sum += float(out["mcs_used"])
-        drops += int(out["dropped"])
-
-    return {
-        "return": ep_return,
-        "tbs": n_tbs,
-        "first_tx_bler": 1.0 - n_ack / max(n_tbs, 1),
-        "tb_fail": 1.0 - n_tb_success / max(n_tbs, 1),
-        "mean_mcs": mcs_sum / max(n_tbs, 1),
-        "mean_slots_tb": n_slots / max(n_tbs, 1),
-        "throughput": ep_return / max(env.num_slots, 1),
-        "drops": drops,
-    }
+    return _rollout(env, policy, seed)
 
 
 def print_row(name, m, bler_target, *, prefix=""):

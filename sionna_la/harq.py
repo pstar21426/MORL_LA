@@ -1,4 +1,4 @@
-# HARQ-IR: mean MI -> SNR_eff, BLER at effective code rate
+# HARQ-IR: first TX uses raw SNR; retx SNR_eff = I^{-1}(mean I), same Qm, R/n, original TBS.
 
 import numpy as np
 from scipy.special import logsumexp
@@ -8,7 +8,6 @@ MOD_TO_QM = {v: k for k, v in QM_TO_MOD.items()}
 
 _SNR_DB_GRID = np.arange(-30.0, 40.0 + 1e-9, 0.25)
 _GH_NODES = 40
-SNR_GRID_MAX_DB = float(_SNR_DB_GRID[-1])
 _MI_TABLES = {}
 
 
@@ -18,7 +17,6 @@ def _pam_constellation(order):
 
 
 def _pam_mi(order, snr_lin):
-    # AWGN PAM mutual information (Gauss-Hermite)
     x = _pam_constellation(order)
     sigma = np.sqrt(1.0 / snr_lin)[:, None]
     t, w = np.polynomial.hermite.hermgauss(_GH_NODES)
@@ -36,12 +34,10 @@ def _pam_mi(order, snr_lin):
 
 
 def _qam_mi(qm, snr_lin):
-    # square QAM = two independent PAM axes
     return 2.0 * _pam_mi(int(2 ** (qm // 2)), snr_lin)
 
 
 def _mi_table(mod):
-    # cache MI tables for each modulation -> memoization
     if mod not in _MI_TABLES:
         snr_lin = 10.0 ** (_SNR_DB_GRID / 10.0)
         _MI_TABLES[mod] = _qam_mi(MOD_TO_QM[mod], snr_lin)
@@ -52,8 +48,6 @@ def mod_from_qm(qm):
     return QM_TO_MOD[int(qm)]
 
 
-# X축, Y축을 입력하고, X값을 넣으면, 선형 보간을 통해 Y값을 반환
-# _mi_table을 snr_lin = 10.0**(_SNR_DB_GRID / 10.0)으로 만들어서, 길이는 항상 같음
 def mi_from_snr_db(mod, snr_db):
     return float(np.interp(snr_db, _SNR_DB_GRID, _mi_table(mod)))
 # SNR_DB -> MI
@@ -62,11 +56,9 @@ def snr_db_from_mi(mod, mi):
     return float(np.interp(mi, _mi_table(mod), _SNR_DB_GRID))
 # MI -> SNR_DB
 
-class HarqProcess:
-    # k: #retx, mi_tot: weighted sum of I(gamma), mcs/qm/R locked at initial tx
 
-    def __init__(self, combining_rho=0.9, max_retx=3):
-        self.combining_rho = float(combining_rho)
+class HarqProcess:
+    def __init__(self, max_retx=2):
         self.max_retx = int(max_retx)
         self.reset()
 
@@ -77,36 +69,36 @@ class HarqProcess:
         self.qm = None
         self.coderate = None
         self.tbs = 0
+        self.cb_size = 0
+        self.num_cb = 0
 
-    def start_transmission(self, mcs_index, qm, coderate):
+    def start_transmission(self, mcs_index, qm, coderate, tbs, cb_size, num_cb):
         self.mcs = int(mcs_index)
         self.qm = int(qm)
         self.coderate = float(coderate)
+        self.tbs = int(tbs)
+        self.cb_size = int(cb_size)
+        self.num_cb = int(num_cb)
         self.mi_tot = 0.0
         self.k = 0
 
     @property
-    def n_eff(self):
-        # 1 + rho + ... + rho^k  (current attempt included)
-        rho = self.combining_rho
-        n = self.k + 1
-        if abs(rho - 1.0) < 1e-12:
-            return float(n)
-        return (1.0 - rho**n) / (1.0 - rho)
+    def n_tx(self):
+        return self.k + 1
 
     @property
     def rate_eff(self):
-        return float(self.coderate) / max(self.n_eff, 1e-12)
+        return float(self.coderate) / self.n_tx
 
     def accumulate(self, snr_true_db):
-        # I_tot += rho^k * I(gamma); SNR_eff = I^{-1}(I_tot / N_eff)
+        snr_true_db = float(snr_true_db)
         mod = mod_from_qm(self.qm)
-        self.mi_tot += (self.combining_rho**self.k) * mi_from_snr_db(mod, snr_true_db)
-        i_avg = self.mi_tot / max(self.n_eff, 1e-12)
-        return snr_db_from_mi(mod, i_avg)
+        self.mi_tot += mi_from_snr_db(mod, snr_true_db)
+        if self.n_tx == 1:
+            return snr_true_db
+        return snr_db_from_mi(mod, self.mi_tot / self.n_tx)
 
     def on_nack(self):
-        # True => drop (retx budget exhausted)
         if self.k >= self.max_retx:
             self.reset()
             return True

@@ -16,11 +16,6 @@ def _mcs_from_cqi(cqi_index, cqi_to_mcs):
 
 
 class IllaPolicy:
-    """
-    Inner-loop LA: reported CQI -> MCS (3GPP-style table lookup).
-    Uses discrete CQI only (same info UE would report).
-    """
-
     name = "illa"
 
     def __init__(self, mcs_min, mcs_max, mcs_table_index=1):
@@ -39,13 +34,7 @@ class IllaPolicy:
 
 
 class OllaPolicy:
-    """
-    Outer-loop LA (srsRAN-style): CQI -> SNR_base, add SNR offset, map to MCS.
-    ACK  -> offset += step_up_db   (more aggressive)
-    NACK -> offset -= step_down_db (more conservative)
-    step_down_db = step_up_db * (1/BLER - 1)
-    """
-
+    # CQI -> SNR_base + offset -> MCS. ACK: +step_up, NACK: -step_up*(1/BLER-1)
     name = "olla"
 
     def __init__(
@@ -59,8 +48,10 @@ class OllaPolicy:
         bler_target=0.1,
         step_up_db=None,
         step_down_db=None,
-        sinr_min_db=-15.0,
-        sinr_max_db=35.0,
+        sinr_min_db=-5.0,
+        sinr_max_db=30.0,
+        offset_min_db=-20.0,
+        offset_max_db=20.0,
     ):
         self.phy_abs = phy_abs
         self.num_allocated_re = num_allocated_re
@@ -71,6 +62,8 @@ class OllaPolicy:
         self.bler_target = float(bler_target)
         self.sinr_min_db = float(sinr_min_db)
         self.sinr_max_db = float(sinr_max_db)
+        self.offset_min_db = float(offset_min_db)
+        self.offset_max_db = float(offset_max_db)
 
         self.step_up_db = 0.1 if step_up_db is None else float(step_up_db)
         if step_down_db is None:
@@ -105,6 +98,9 @@ class OllaPolicy:
                 self._offset_db += self.step_up_db
             else:
                 self._offset_db -= self.step_down_db
+        self._offset_db = float(
+            np.clip(self._offset_db, self.offset_min_db, self.offset_max_db)
+        )
 
         cqi = int(np.clip(int(info["cqi_index"]), 0, 15))
         base_sinr_db = self._cqi_to_sinr_db[cqi]
@@ -147,7 +143,6 @@ class EpsilonGreedyPolicy:
 
 
 def make_baseline_policy(name, env, bler_target=0.1, olla_step_up_db=None):
-    """Build ILLA/OLLA from env MCS table settings."""
     if name == "illa":
         return IllaPolicy(
             mcs_min=env.mcs_min,

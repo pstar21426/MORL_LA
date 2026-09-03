@@ -15,8 +15,7 @@ from la_env import DownlinkLAEnv, seed_phy
 from train_dqn import load_config
 
 
-def slot_cum_return_block(rewards, slots_per_tb, total_slots):
-    """TB 완료 후 해당 TB가 차지한 슬롯 구간 전체에 cum return 반영."""
+def slot_cum_return(rewards, slots_per_tb, total_slots):
     y = np.zeros(total_slots, dtype=np.float64)
     t = 0
     cum = 0.0
@@ -30,34 +29,6 @@ def slot_cum_return_block(rewards, slots_per_tb, total_slots):
             break
     if t < total_slots:
         y[t:] = cum
-    return y
-
-
-def slot_cum_return_ffill(rewards, slots_per_tb, total_slots):
-    """
-    Decision-step only: TB가 끝나는 슬롯에서만 cum return 갱신,
-    그 사이 슬롯은 forward-fill (이전 값 유지).
-    """
-    marks = np.full(total_slots, np.nan, dtype=np.float64)
-    t = 0
-    cum = 0.0
-    for r, ns in zip(rewards, slots_per_tb):
-        ns = max(int(ns), 1)
-        end = min(t + ns, total_slots)
-        if end <= t:
-            break
-        cum += float(r)
-        marks[end - 1] = cum
-        t = end
-        if t >= total_slots:
-            break
-
-    y = np.zeros(total_slots, dtype=np.float64)
-    last = 0.0
-    for i in range(total_slots):
-        if not np.isnan(marks[i]):
-            last = marks[i]
-        y[i] = last
     return y
 
 
@@ -157,9 +128,9 @@ def main():
     dqn = dqn_rollout(env, dqn_ckpt, seed)
 
     curves = {
-        "ILLA": slot_cum_return_block(illa["reward"], illa["num_slots"], total_slots),
-        "OLLA": slot_cum_return_block(olla["reward"], olla["num_slots"], total_slots),
-        "DQN": slot_cum_return_ffill(dqn["reward"], dqn["num_slots"], total_slots),
+        "ILLA": slot_cum_return(illa["reward"], illa["num_slots"], total_slots),
+        "OLLA": slot_cum_return(olla["reward"], olla["num_slots"], total_slots),
+        "DQN": slot_cum_return(dqn["reward"], dqn["num_slots"], total_slots),
     }
 
     out_path = out_dir / f"t_return_seed{seed}.png"

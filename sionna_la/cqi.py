@@ -23,27 +23,6 @@ _CQI_SE = {
 }
 CQI_MAX = 15
 
-
-def _mcs_spectral_efficiency(mcs_index, mcs_table_index):
-    qm, rate = decode_mcs_index(
-        torch.tensor([int(mcs_index)], dtype=torch.int32),
-        table_index=mcs_table_index,
-        is_pusch=False,
-    )
-    return float(qm.item() * rate.item())
-
-
-def build_cqi_to_mcs(mcs_min, mcs_max, mcs_table_index=1):
-    # nearest MCS (by SE) for each CQI in 1..15
-    se_mcs = {
-        m: _mcs_spectral_efficiency(m, mcs_table_index) for m in range(mcs_min, mcs_max + 1)
-    }
-    mapping = {0: mcs_min}
-    for q, se in _CQI_SE.items():
-        mapping[q] = min(se_mcs, key=lambda m: abs(se_mcs[m] - se))
-    return mapping
-
-
 _MCS_QM_RATE = {}
 
 
@@ -62,23 +41,36 @@ def _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max):
     return _MCS_QM_RATE[key]
 
 
-def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1):
-    # same Qm, highest coderate <= R_eff; if none, drop one modulation order
+def build_cqi_to_mcs(mcs_min, mcs_max, mcs_table_index=1):
     rows = _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max)
-    rate_eff = float(rate_eff)
-    qm = int(qm)
-    qm_order = [8, 6, 4, 2]
-    if qm not in qm_order:
-        qm_order = [qm] + qm_order
-    start = qm_order.index(qm) if qm in qm_order else 0
-    for q in qm_order[start:]:
-        cands = [(m, r) for m, qq, r in rows if qq == q]
-        if not cands:
-            continue
-        below = [(m, r) for m, r in cands if r <= rate_eff + 1e-12]
-        if below:
-            return int(max(below, key=lambda x: x[1])[0])
-    return int(mcs_min)
+    se_mcs = {m: qm * rate for m, qm, rate in rows}
+    mapping = {0: int(mcs_min)}
+    for q, se in _CQI_SE.items():
+        mapping[q] = min(se_mcs, key=lambda m: abs(se_mcs[m] - se))
+    return mapping
+
+
+def mcs_qm_rate(mcs_index, mcs_min, mcs_max, mcs_table_index=1):
+    mcs_index = int(mcs_index)
+    for m, qm, rate in _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max):
+        if m == mcs_index:
+            return qm, rate
+    raise ValueError(f"MCS {mcs_index} not in [{mcs_min}, {mcs_max}]")
+
+
+def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1):
+    # same Qm: highest coderate <= R_eff, else lowest-rate MCS of that Qm
+    cands = [
+        (m, r)
+        for m, qq, r in _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max)
+        if qq == int(qm)
+    ]
+    if not cands:
+        return int(mcs_min)
+    below = [(m, r) for m, r in cands if r <= float(rate_eff) + 1e-12]
+    if below:
+        return int(max(below, key=lambda x: x[1])[0])
+    return int(min(cands, key=lambda x: x[1])[0])
 
 
 def normalize_cqi(cqi_index):
@@ -97,24 +89,13 @@ def _as_float_vec(x):
     return x.to(dtype=torch.float32).reshape(-1)
 
 
-def tbler_from_phy(
-    phy_abs,
-    mcs_index,
-    sinr_eff_lin,
-    num_allocated_re,
-    mcs_table_index=1,
-    mcs_category=1,
-):
-    # TBLER + PHY TBS (num_cb * cb_size). Table lookup only — no ACK sample.
-    mcs = _as_int32_vec(mcs_index)
-    n = int(mcs.numel())
-    sinr = _as_float_vec(sinr_eff_lin)
-    if sinr.numel() == 1 and n > 1:
-        sinr = sinr.expand(n)
-    n_re = _as_int32_vec(num_allocated_re)
-    if n_re.numel() == 1 and n > 1:
-        n_re = n_re.expand(n)
+def _match_len(x, n):
+    if x.numel() == 1 and n > 1:
+        return x.expand(n)
+    return x
 
+
+def _tb_size_from_mcs(mcs, n_re, mcs_table_index=1, mcs_category=1):
     qm, rate = decode_mcs_index(
         mcs,
         table_index=mcs_table_index,
@@ -129,10 +110,48 @@ def tbler_from_phy(
         tb_scaling=1.0,
         return_cw_length=False,
     )
-    bler = phy_abs.get_bler(mcs, mcs_table_index, mcs_category, cb_size, sinr)
-    one = torch.ones((), dtype=bler.dtype, device=bler.device)
-    tbler = one - torch.pow(one - bler, num_cb.to(dtype=bler.dtype))
     tbs = (num_cb * cb_size).to(torch.int32)
+    return tbs, cb_size, num_cb
+
+
+def tb_layout_from_mcs(
+    mcs_index,
+    num_allocated_re,
+    mcs_table_index=1,
+    mcs_category=1,
+):
+    mcs = _as_int32_vec(mcs_index)
+    n_re = _match_len(_as_int32_vec(num_allocated_re), int(mcs.numel()))
+    return _tb_size_from_mcs(
+        mcs, n_re, mcs_table_index=mcs_table_index, mcs_category=mcs_category
+    )
+
+
+def tbler_from_phy(
+    phy_abs,
+    mcs_index,
+    sinr_eff_lin,
+    num_allocated_re=None,
+    mcs_table_index=1,
+    mcs_category=1,
+    cb_size=None,
+    num_cb=None,
+):
+    mcs = _as_int32_vec(mcs_index)
+    n = int(mcs.numel())
+    sinr = _match_len(_as_float_vec(sinr_eff_lin), n)
+    if cb_size is None or num_cb is None:
+        n_re = _match_len(_as_int32_vec(num_allocated_re), n)
+        tbs, cb_sz, n_cb = _tb_size_from_mcs(
+            mcs, n_re, mcs_table_index=mcs_table_index, mcs_category=mcs_category
+        )
+    else:
+        cb_sz = _match_len(_as_int32_vec(cb_size), n)
+        n_cb = _match_len(_as_int32_vec(num_cb), n)
+        tbs = (n_cb * cb_sz).to(torch.int32)
+    bler = phy_abs.get_bler(mcs, mcs_table_index, mcs_category, cb_sz, sinr)
+    one = torch.ones((), dtype=bler.dtype, device=bler.device)
+    tbler = one - torch.pow(one - bler, n_cb.to(dtype=bler.dtype))
     return tbler, tbs
 
 
@@ -145,7 +164,6 @@ def report_cqi(
     mcs_category=1,
     bler_target=0.1,
 ):
-    # highest CQI in {1..15} with TBLER(MCS(CQI), SINR) <= bler_target; else 0
     mcs = torch.tensor(
         [cqi_to_mcs[q] for q in range(1, CQI_MAX + 1)], dtype=torch.int32
     )
@@ -161,27 +179,7 @@ def report_cqi(
     ok = np.where(tbler <= float(bler_target))[0]
     if ok.size == 0:
         return 0
-    return int(ok[-1] + 1)  # 1-based CQI
-
-
-def _tbler_at_sinr_db(
-    phy_abs,
-    mcs_index,
-    sinr_db,
-    num_allocated_re,
-    mcs_table_index=1,
-    mcs_category=1,
-):
-    sinr_lin = db_to_lin(torch.tensor([float(sinr_db)], dtype=torch.float32))
-    tbler, _ = tbler_from_phy(
-        phy_abs,
-        mcs_index,
-        sinr_lin,
-        num_allocated_re,
-        mcs_table_index=mcs_table_index,
-        mcs_category=mcs_category,
-    )
-    return float(tbler.reshape(-1)[0].item())
+    return int(ok[-1] + 1)
 
 
 def calibrate_cqi_to_sinr_db(
@@ -191,8 +189,8 @@ def calibrate_cqi_to_sinr_db(
     mcs_table_index=1,
     mcs_category=1,
     bler_target=0.1,
-    sinr_min_db=-15.0,
-    sinr_max_db=35.0,
+    sinr_min_db=-5.0,
+    sinr_max_db=30.0,
 ):
     out = {0: float(sinr_min_db)}
     for q in range(1, CQI_MAX + 1):
@@ -200,14 +198,16 @@ def calibrate_cqi_to_sinr_db(
         lo, hi = float(sinr_min_db), float(sinr_max_db)
         for _ in range(32):
             mid = 0.5 * (lo + hi)
-            if _tbler_at_sinr_db(
+            sinr_lin = db_to_lin(torch.tensor([mid], dtype=torch.float32))
+            tbler, _ = tbler_from_phy(
                 phy_abs,
                 mcs,
-                mid,
+                sinr_lin,
                 num_allocated_re,
                 mcs_table_index=mcs_table_index,
                 mcs_category=mcs_category,
-            ) > float(bler_target):
+            )
+            if float(tbler.reshape(-1)[0].item()) > float(bler_target):
                 lo = mid
             else:
                 hi = mid
@@ -225,7 +225,6 @@ def mcs_from_sinr_db(
     mcs_category=1,
     bler_target=0.1,
 ):
-    # highest MCS with TBLER <= bler_target at effective SNR
     lo, hi = int(mcs_min), int(mcs_max)
     mcs = torch.arange(lo, hi + 1, dtype=torch.int32)
     sinr_lin = db_to_lin(torch.tensor([float(sinr_db)], dtype=torch.float32))

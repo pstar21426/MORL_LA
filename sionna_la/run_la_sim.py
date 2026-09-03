@@ -61,7 +61,10 @@ def rollout(env, policy, seed):
         log["decoded_bits"].append(out["decoded_bits"])
         state = next_state
 
-    return {k: np.asarray(v) for k, v in log.items()}
+    out = {k: np.asarray(v) for k, v in log.items()}
+    out["sinr_true_trace"] = np.asarray(env._sinr_true_db, dtype=np.float64)
+    out["sinr_hat_trace"] = np.asarray(env._sinr_fb_db, dtype=np.float64)
+    return out
 
 
 def metrics_from_rollout(res, num_slots):
@@ -121,55 +124,122 @@ def print_mean_row(name, agg, bler_target):
 
 
 def _rolling(x, window):
-    if len(x) < window:
-        return x.astype(np.float64)
-    return np.convolve(x.astype(np.float64), np.ones(window) / window, mode="valid")
+    x = np.asarray(x, dtype=np.float64)
+    if len(x) == 0:
+        return x
+    w = max(1, min(int(window), len(x)))
+    if w == 1:
+        return x
+    c = np.cumsum(x, dtype=np.float64)
+    out = np.empty_like(x)
+    out[: w - 1] = c[: w - 1] / np.arange(1, w)
+    out[w - 1 :] = (c[w - 1 :] - np.concatenate(([0.0], c[: len(x) - w]))) / w
+    return out
 
 
-def plot_results(results, bler_target, out_path, mcs_window=50):
-    fig, axs = plt.subplots(5, 1, figsize=(9, 13), sharex=False)
+def _slot_cum_return(rewards, slots_per_tb, total_slots):
+    y = np.zeros(int(total_slots), dtype=np.float64)
+    t = 0
+    cum = 0.0
+    for r, ns in zip(rewards, slots_per_tb):
+        ns = max(int(ns), 1)
+        cum += float(r)
+        end = min(t + ns, total_slots)
+        y[t:end] = cum
+        t = end
+        if t >= total_slots:
+            break
+    if t < total_slots:
+        y[t:] = cum
+    return y
 
-    ref_name, ref = next(iter(results.items()))
-    n = np.arange(len(ref["ack"]))
-    axs[0].plot(n, ref["sinr_true_db"], label="true SINR", color="C0", lw=0.9)
-    axs[0].plot(n, ref["sinr_hat_db"], ":", label="SINR hat (pre-CQI)", color="C1", alpha=0.85)
+
+def _slot_hold(values, slots_per_tb, total_slots):
+    y = np.empty(int(total_slots), dtype=np.float64)
+    t = 0
+    last = float(values[0]) if len(values) else 0.0
+    for v, ns in zip(values, slots_per_tb):
+        ns = max(int(ns), 1)
+        last = float(v)
+        end = min(t + ns, total_slots)
+        y[t:end] = last
+        t = end
+        if t >= total_slots:
+            break
+    if t < total_slots:
+        y[t:] = last
+    return y
+
+
+def _flush_xlim(ax, x_max):
+    ax.set_xlim(0, x_max)
+    ax.margins(x=0)
+
+
+def plot_results(results, bler_target, out_path, num_slots, mcs_window=50):
+    fig, axs = plt.subplots(5, 1, figsize=(9, 13), sharex=True)
+
+    ref = next(iter(results.values()))
+    slots = np.arange(num_slots)
+    x_max = num_slots - 1
+
+    sinr_true = ref.get("sinr_true_trace")
+    sinr_hat = ref.get("sinr_hat_trace")
+    if sinr_true is None:
+        sinr_true = _slot_hold(ref["sinr_true_db"], ref["num_slots"], num_slots)
+    if sinr_hat is None:
+        sinr_hat = _slot_hold(ref["sinr_hat_db"], ref["num_slots"], num_slots)
+    axs[0].plot(slots, sinr_true[:num_slots], label="true SINR", color="C0", lw=0.9)
+    axs[0].plot(
+        slots,
+        sinr_hat[:num_slots],
+        ":",
+        label="SINR hat (pre-CQI)",
+        color="C1",
+        alpha=0.85,
+    )
     axs[0].set_ylabel("SINR [dB]")
-    axs[0].set_xlabel("decision index")
     axs[0].legend(loc="best", fontsize=8)
     axs[0].grid(True, alpha=0.3)
-    axs[0].set_title("Decision-step LA (CQI state + PHYAbstraction)")
+    axs[0].set_title("Downlink LA (slot axis)")
+    _flush_xlim(axs[0], x_max)
 
-    axs[1].step(n, ref["cqi_index"], where="post", label="reported CQI", color="C2")
+    cqi_slot = _slot_hold(ref["cqi_index"], ref["num_slots"], num_slots)
+    axs[1].step(slots, cqi_slot, where="post", label="reported CQI", color="C2")
     axs[1].set_ylabel("CQI index")
     axs[1].set_ylim(-0.5, 15.5)
-    axs[1].set_xlabel("decision index")
     axs[1].legend(loc="best", fontsize=8)
     axs[1].grid(True, alpha=0.3)
+    _flush_xlim(axs[1], x_max)
 
     for name, res in results.items():
-        m = _rolling(res["mcs_used"], mcs_window)
+        mcs_slot = _slot_hold(res["mcs_used"], res["num_slots"], num_slots)
+        m = _rolling(mcs_slot, mcs_window)
         axs[2].plot(np.arange(len(m)), m, label=name.upper())
-    axs[2].set_ylabel(f"MCS ({mcs_window}-TB roll mean)")
-    axs[2].set_xlabel("decision index")
+    axs[2].set_ylabel(f"MCS ({mcs_window}-slot roll mean)")
     axs[2].legend(loc="best", fontsize=8)
     axs[2].grid(True, alpha=0.3)
+    _flush_xlim(axs[2], x_max)
 
     for name, res in results.items():
-        axs[3].plot(np.cumsum(res["reward"]), label=name.upper())
+        y = _slot_cum_return(res["reward"], res["num_slots"], num_slots)
+        axs[3].plot(slots, y, label=name.upper())
     axs[3].set_ylabel("cum reward")
-    axs[3].set_xlabel("decision index")
     axs[3].legend(loc="best", fontsize=8)
     axs[3].grid(True, alpha=0.3)
+    _flush_xlim(axs[3], x_max)
 
     for name, res in results.items():
         ack = res["ack"].astype(np.float64)
         emp = 1.0 - np.cumsum(ack) / np.arange(1, len(ack) + 1)
-        axs[4].plot(emp, label=f"{name.upper()} first-tx BLER")
+        emp_slot = _slot_hold(emp, res["num_slots"], num_slots)
+        axs[4].plot(slots, emp_slot, label=f"{name.upper()} first-tx BLER")
     axs[4].axhline(bler_target, color="k", ls="--", label="target")
     axs[4].set_ylabel("emp BLER")
-    axs[4].set_xlabel("decision index")
+    axs[4].set_xlabel("slot")
     axs[4].legend(loc="best", fontsize=8)
     axs[4].grid(True, alpha=0.3)
+    _flush_xlim(axs[4], x_max)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -265,7 +335,7 @@ def main():
 
         if cfg.get("save_plot", True) and eval_seed == plot_seed:
             path = out_dir / f"la_baselines_seed{eval_seed}.png"
-            plot_results(results, bler_target, path)
+            plot_results(results, bler_target, path, num_slots=num_slots)
             print(f"Saved plot -> {path}")
 
         if cfg.get("save_npz", True):

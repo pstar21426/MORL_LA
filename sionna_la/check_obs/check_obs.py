@@ -5,9 +5,19 @@ DownlinkLAEnv observation / state verification (all-in-one).
 Checks:
   1. Invariants during rollout (current CQI, step continuity, env._state match)
   2. History reconstruction via ACK-delay queue simulation
-  3. Scatter plots (CQI, MCS/ACK/CQI history, ILLA/OLLA oracle actions)
-  4. ACK-delay timing plot (when ack_delay_slots > 0)
-  5. DQN (--dqn): greedy consistency + vs ILLA baseline on same seed
+  3. CSI delay: gamma_hat[t] ~ gamma_true[t-d] (+ noise)
+  4. PHY: mean predicted TBLER vs empirical first-tx BLER
+  5. Scatter plots (CQI, MCS/ACK/CQI history, ILLA/OLLA oracle actions)
+  6. ACK-delay timing plot (when ack_delay_slots > 0)
+  7. DQN (--dqn): greedy consistency + vs ILLA baseline on same seed
+
+Plots:
+  obs_csi_*     : slot-axis gamma_true vs gamma_hat + CQI@decision
+  obs_csi_scatter_* : square delay-aligned gamma scatter
+  obs_basic_*   : state invariants
+  obs_reconstruct_* : queue replay vs logged state
+  obs_illa_oracle_* : ILLA reference actions
+  obs_timing_*  : ACK delay (when > 0)
 
 Run from sionna_la/:
   python check_obs/check_obs.py
@@ -128,6 +138,11 @@ def rollout_detailed(env: DownlinkLAEnv, policy, seed: int) -> dict:
         "mcs_used": [],
         "mcs_norm": [],
         "ack": [],
+        "sinr_true_decision": [],
+        "sinr_hat_decision": [],
+        "tbler": [],
+        "tbler_first": [],
+        "num_retx": [],
         "ack_delay": env.ack_delay_slots,
         "state_num_lags": L,
         "mcs_min": env.mcs_min,
@@ -158,10 +173,35 @@ def rollout_detailed(env: DownlinkLAEnv, policy, seed: int) -> dict:
         log["mcs_used"].append(mcs_used)
         log["mcs_norm"].append(mcs_norm)
         log["ack"].append(int(out["ack"]))
+        log["sinr_true_decision"].append(float(out["sinr_true_db"]))
+        log["sinr_hat_decision"].append(float(out["sinr_hat_db"]))
+        log["tbler"].append(float(out["tbler"]))
+        log["tbler_first"].append(float(out["tbler_first"]))
+        log["num_retx"].append(int(out["num_retx"]))
         state = next_state
 
+    log["sinr_true_db"] = env._sinr_true_db.copy()
+    log["sinr_hat_db"] = env._sinr_fb_db.copy()
+    log["cqi_delay_slots"] = int(env._delay_used)
+    log["cqi_noise_std_db"] = float(env.cqi_noise_std_db)
+    log["num_slots"] = int(env.num_slots)
+    log["bler_target"] = float(env.cqi_bler_target)
+    log["seed"] = seed
+
     for k, v in log.items():
-        if k in ("ack_delay", "state_num_lags", "mcs_min", "mcs_span"):
+        if k in (
+            "ack_delay",
+            "state_num_lags",
+            "mcs_min",
+            "mcs_span",
+            "cqi_delay_slots",
+            "cqi_noise_std_db",
+            "num_slots",
+            "bler_target",
+            "seed",
+        ):
+            continue
+        if k in ("sinr_true_db", "sinr_hat_db"):
             continue
         log[k] = np.asarray(v)
     return log
@@ -277,6 +317,70 @@ def check_reconstructed_states(log: dict, tol: float = 1e-5) -> CheckReport:
                 f"  step {i} dim {j}: logged={actual[i,j]:.4f} "
                 f"expected={expected[i,j]:.4f}"
             )
+    return rep
+
+
+def _aligned_gamma_hat_pairs(gamma: np.ndarray, hat: np.ndarray, delay: int):
+    """gamma_hat[t] uses delayed gamma: hat[t] ~ gamma[t-delay] for t >= delay."""
+    n = min(len(gamma), len(hat))
+    delay = max(0, int(delay))
+    if delay >= n:
+        return np.array([]), np.array([])
+    t_idx = np.arange(delay, n)
+    return gamma[t_idx - delay], hat[t_idx]
+
+
+def check_csi_delay(log: dict, min_corr: float = 0.85) -> CheckReport:
+    """CSI chain: hat trace follows true with configured CQI delay + noise."""
+    rep = CheckReport("csi_delay")
+    gamma = np.asarray(log["sinr_true_db"], dtype=np.float64)
+    hat = np.asarray(log["sinr_hat_db"], dtype=np.float64)
+    delay = int(log["cqi_delay_slots"])
+    noise_std = float(log.get("cqi_noise_std_db", 1.5))
+
+    x, y = _aligned_gamma_hat_pairs(gamma, hat, delay)
+    if x.size < 10:
+        rep.record(False, "too few aligned CSI samples")
+        return rep
+
+    corr = float(np.corrcoef(x, y)[0, 1])
+    rep.record(
+        corr >= min_corr,
+        f"corr(gamma_true[t-{delay}], gamma_hat[t])={corr:.3f} (min {min_corr})",
+    )
+
+    resid = y - x
+    rep.record(
+        abs(float(np.mean(resid))) <= max(2.0 * noise_std, 0.5),
+        f"mean residual {np.mean(resid):.3f} dB (noise_std={noise_std})",
+    )
+    rep.record(
+        float(np.std(resid)) <= max(2.5 * noise_std, 1.0),
+        f"residual std {np.std(resid):.3f} dB",
+    )
+
+    if noise_std < 1e-6:
+        rep.record(
+            float(np.max(np.abs(resid))) < 1e-3,
+            f"noise=0: max |hat-true|={np.max(np.abs(resid)):.2e}",
+        )
+    return rep
+
+
+def check_phy_tbler(log: dict, tol: float = 0.12) -> CheckReport:
+    """Mean predicted first-tx TBLER vs empirical first-tx BLER."""
+    rep = CheckReport("phy_tbler")
+    tbler = np.asarray(log["tbler_first"], dtype=np.float64)
+    ack = np.asarray(log["ack"], dtype=np.float64)
+    if tbler.size == 0:
+        rep.record(False, "no TB outcomes logged")
+        return rep
+    emp = float(1.0 - ack.mean())
+    pred = float(tbler.mean())
+    rep.record(
+        abs(emp - pred) <= tol,
+        f"emp 1st-tx BLER={emp:.3f} vs mean predicted TBLER={pred:.3f} (tol {tol})",
+    )
     return rep
 
 
@@ -444,6 +548,123 @@ def _diag_scatter(ax, x, y, title, xlabel, ylabel):
     ax.grid(True, alpha=0.3)
     err = np.max(np.abs(np.asarray(x) - np.asarray(y)))
     ax.text(0.02, 0.98, f"max |Δ|={err:.2e}", transform=ax.transAxes, va="top", fontsize=8)
+
+
+def plot_csi_scatter(
+    log: dict,
+    policy_name: str,
+    seed: int,
+    out_dir: Path,
+) -> Path:
+    """Square delay-aligned scatter: gamma_hat[t] vs gamma_true[t-d]."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    gamma = np.asarray(log["sinr_true_db"], dtype=np.float64)
+    hat = np.asarray(log["sinr_hat_db"], dtype=np.float64)
+    delay = int(log["cqi_delay_slots"])
+    ack_delay = int(log["ack_delay"])
+    tag = f"{policy_name}_seed{seed}_ackd{ack_delay}"
+    x_align, y_align = _aligned_gamma_hat_pairs(gamma, hat, delay)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    if x_align.size:
+        ax.scatter(x_align, y_align, s=8, alpha=0.4, color="C2")
+        lo = float(min(x_align.min(), y_align.min()))
+        hi = float(max(x_align.max(), y_align.max()))
+        pad = 0.05 * (hi - lo) if hi > lo else 1.0
+        lo, hi = lo - pad, hi + pad
+        ax.plot([lo, hi], [lo, hi], "k--", lw=0.8, alpha=0.7)
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        ax.text(
+            0.02,
+            0.98,
+            f"n={x_align.size}\nmean resid={np.mean(y_align - x_align):.2f} dB",
+            transform=ax.transAxes,
+            va="top",
+            fontsize=8,
+        )
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(rf"$\gamma_\mathrm{{true}}[t-{delay}]$ [dB]")
+    ax.set_ylabel(r"$\hat{\gamma}[t]$ [dB]")
+    ax.set_title(f"Delay-aligned CSI scatter — {tag}")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    path = out_dir / f"obs_csi_scatter_{tag}.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def plot_csi_verification(
+    log: dict,
+    policy_name: str,
+    seed: int,
+    out_dir: Path,
+) -> tuple[Path, Path]:
+    """Slot-axis CSI traces + decision CQI. Scatter is a separate square file."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    gamma = np.asarray(log["sinr_true_db"], dtype=np.float64)
+    hat = np.asarray(log["sinr_hat_db"], dtype=np.float64)
+    delay = int(log["cqi_delay_slots"])
+    noise_std = float(log.get("cqi_noise_std_db", 1.5))
+    ack_delay = int(log["ack_delay"])
+    tag = f"{policy_name}_seed{seed}_ackd{ack_delay}"
+
+    n_show = min(len(gamma), int(log.get("num_slots", len(gamma))))
+    t = np.arange(n_show)
+    x_align, y_align = _aligned_gamma_hat_pairs(gamma, hat, delay)
+    corr = float(np.corrcoef(x_align, y_align)[0, 1]) if x_align.size > 1 else float("nan")
+
+    fig, axs = plt.subplots(2, 1, figsize=(10, 7))
+
+    axs[0].plot(t, gamma[:n_show], label=r"$\gamma_\mathrm{true}$", color="C0", lw=1.0)
+    axs[0].plot(t, hat[:n_show], label=r"$\hat{\gamma}$ (CQI input)", color="C1", lw=1.0, alpha=0.9)
+    if delay > 0:
+        shifted = np.full(n_show, np.nan)
+        shifted[delay:n_show] = gamma[: n_show - delay]
+        axs[0].plot(
+            t,
+            shifted,
+            ":",
+            color="C0",
+            alpha=0.55,
+            label=rf"$\gamma_\mathrm{{true}}[t-{delay}]$",
+        )
+    axs[0].set_ylabel("SINR [dB]")
+    axs[0].set_title(
+        f"CSI traces (cqi_delay={delay}, noise={noise_std:g} dB, corr={corr:.3f})"
+    )
+    axs[0].legend(loc="upper right", fontsize=8)
+    axs[0].grid(True, alpha=0.3)
+
+    tb = np.arange(len(log["cqi_index"]))
+    axs[1].step(tb, log["cqi_index"], where="mid", color="C2", label="reported CQI")
+    axs[1].set_ylabel("CQI index")
+    axs[1].set_ylim(-0.5, 15.5)
+    ax2 = axs[1].twinx()
+    ax2.plot(
+        tb,
+        log["sinr_hat_decision"],
+        "o",
+        ms=2.5,
+        alpha=0.45,
+        color="C1",
+        label=r"$\hat{\gamma}$ @ decision",
+    )
+    ax2.set_ylabel(r"$\hat{\gamma}$ @ decision [dB]", color="C1")
+    axs[1].set_title("Decision-step CQI vs SINR hat")
+    axs[1].set_xlabel("TB / decision index")
+    axs[1].grid(True, alpha=0.3)
+    lines1, labels1 = axs[1].get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    axs[1].legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=8)
+
+    fig.suptitle(f"CSI verification — {tag}", fontsize=11)
+    fig.tight_layout()
+    path = out_dir / f"obs_csi_{tag}.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path, plot_csi_scatter(log, policy_name, seed, out_dir)
 
 
 def plot_verification(
@@ -617,7 +838,8 @@ def print_report(reports: list[CheckReport], plots: list[Path], log: dict, extra
     print("\n=== Observation verification ===")
     print(
         f"TBs={len(log['state'])} L={log['state_num_lags']} "
-        f"ack_delay={log['ack_delay']} dims={log['state'].shape[1]}"
+        f"ack_delay={log['ack_delay']} cqi_delay={log.get('cqi_delay_slots', '?')} "
+        f"dims={log['state'].shape[1]}"
     )
     if extra:
         for k, v in extra.items():
@@ -666,21 +888,23 @@ def run_dqn_checks(
     policy = _DQNPolicy(agent)
 
     log = rollout_detailed(env, policy, seed=seed)
-    log["seed"] = seed
 
     vs_illa = summarize_dqn_vs_illa(log, env)
     reports = [
         check_invariants(log),
         check_reconstructed_states(log),
+        check_csi_delay(log),
+        check_phy_tbler(log),
         check_greedy_consistency(log, agent),
     ]
 
     expected = simulate_expected_states(log)
     plots: list[Path | None] = []
     if save_plots:
+        p0, p0s = plot_csi_verification(log, "dqn", seed, out_dir)
         p1, p2, p3, p4 = plot_verification(log, expected, "dqn", seed, out_dir)
         p5 = plot_dqn_extra(log, agent, vs_illa["illa_actions"], seed, out_dir)
-        plots = [p1, p2, p3, p4, p5]
+        plots = [p0, p0s, p1, p2, p3, p4, p5]
 
     extra = {
         "dqn_vs_illa_agree": f"{vs_illa['illa_agree']}/{len(log['action'])}",
@@ -717,11 +941,12 @@ def run_checks(
     )
 
     log = rollout_detailed(env, policy, seed=seed)
-    log["seed"] = seed
 
     reports = [
         check_invariants(log),
         check_reconstructed_states(log),
+        check_csi_delay(log),
+        check_phy_tbler(log),
     ]
     if policy_name == "illa":
         reports.append(check_illa_direct(log, env))
@@ -733,10 +958,11 @@ def run_checks(
     expected = simulate_expected_states(log)
     plots: list[Path | None] = []
     if save_plots:
+        p0, p0s = plot_csi_verification(log, policy_name, seed, out_dir)
         p1, p2, p3, p4 = plot_verification(
             log, expected, policy_name, seed, out_dir
         )
-        plots = [p1, p2, p3, p4]
+        plots = [p0, p0s, p1, p2, p3, p4]
 
     return print_report(reports, plots, log)
 
