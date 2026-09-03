@@ -30,7 +30,7 @@ ack_delay_slots: 8
 # srsRAN-style OLLA SNR step (dB); step_down = step_up * (1/BLER - 1)
 olla_step_up_db: 0.1
 
-# HARQ-IR (MI accumulation)
+# HARQ-IR: R_eff = R / sum(rho^i); BLER at lower-rate MCS, SNR from mean MI
 mi_combining_rho: 0.9
 harq_max_retx: 2
 drop_penalty: 6.0

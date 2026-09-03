@@ -11,6 +11,8 @@
 # delta_tau stays in info only (not in state)
 # γ̂ = delayed + noisy SINR (UE measurement before CQI quantization)
 # Reward: SE/num_tx if TB ACKs, -drop_penalty if dropped, 0 on intermediate NACKs
+# HARQ-IR: BLER uses R_eff = R / N_eff and I^{-1}(mean I); MCS locked at first tx
+# ACK is sampled per slot from a dedicated RNG (not CQI/OLLA TBLER lookups)
 # ILLA/OLLA baselines use discrete CQI only (see policies.py)
 
 from collections import deque
@@ -25,7 +27,13 @@ from sionna.phy.utils import db_to_lin
 from sionna.sys import PHYAbstraction
 
 from channel import add_cqi_noise, generate_sinr_db_trace
-from cqi import build_cqi_to_mcs, normalize_cqi, report_cqi
+from cqi import (
+    build_cqi_to_mcs,
+    mcs_for_ir_rate,
+    normalize_cqi,
+    report_cqi,
+    tbler_from_phy,
+)
 from harq import SNR_GRID_MAX_DB, HarqProcess, mod_from_qm
 
 _MCS_RANGE = {1: (3, 28), 2: (2, 27)}
@@ -33,12 +41,18 @@ _UNSEEN = -1.0
 
 
 def seed_phy(seed):
-    # Sionna PHYAbstraction RNG + torch; call before each comparable rollout
+    # torch / leftover Sionna RNG; ACK uses env._ack_seed (reset seed+2), not this
     if seed is None:
         return
     seed = int(seed)
     sionna_config.seed = seed
     torch.manual_seed(seed)
+
+
+def _slot_uniform(ack_seed, slot):
+    # U(0,1) keyed by (ack_seed, slot) so CQI/OLLA lookups cannot steal ACK draws
+    ss = np.random.SeedSequence([int(ack_seed) & 0xFFFFFFFF, int(slot) & 0xFFFFFFFF])
+    return float(np.random.default_rng(ss).random())
 
 
 class DecisionHistory:
@@ -139,6 +153,7 @@ class DownlinkLAEnv(gym.Env):
         self._ever_decided = False
         self._pending_harq = [-1]  # fed to OLLA on next decision
         self._fb_queue = deque()  # (delivery_slot, first_ack, cqi_n, mcs_norm)
+        self._ack_seed = 2
 
     def mcs_from_action(self, action):
         return int(action) + self.mcs_min
@@ -251,6 +266,11 @@ class DownlinkLAEnv(gym.Env):
         )
         self.harq.reset()
         self.hist.reset()
+        self._ack_seed = (
+            int(seed) + 2
+            if seed is not None
+            else int(self.np_random.integers(0, 2**31 - 1))
+        )
         self._t = 0
         self._last_decision_slot = 0
         self._ever_decided = False
@@ -264,19 +284,36 @@ class DownlinkLAEnv(gym.Env):
         sinr_true_db = self._gamma_at(self._t)
         sinr_eq_db = self.harq.accumulate(sinr_true_db)
         sinr_eq_lin = db_to_lin(torch.tensor([sinr_eq_db], dtype=torch.float32))
-        decoded_bits, harq_fb, _, tbler, _ = self.phy_abs(
-            torch.tensor([mcs_used], dtype=torch.int32),
-            sinr_eff=sinr_eq_lin,
-            num_allocated_re=self._num_re_t,
+        if self.harq.k == 0:
+            mcs_lookup = int(mcs_used)
+        else:
+            mcs_lookup = mcs_for_ir_rate(
+                self.harq.rate_eff,
+                self.harq.qm,
+                self.mcs_min,
+                self.mcs_max,
+                mcs_table_index=self.mcs_table_index,
+            )
+        tbler_t, _ = tbler_from_phy(
+            self.phy_abs,
+            mcs_lookup,
+            sinr_eq_lin,
+            self._num_re_t,
             mcs_table_index=self.mcs_table_index,
             mcs_category=self.mcs_category,
         )
+        tbler = float(tbler_t.reshape(-1)[0].item())
+        tbs = int(self.harq.tbs)
+        # PHYAbstraction: U < tbler → NACK (0), else ACK (1)
+        ack = 0 if _slot_uniform(self._ack_seed, self._t) < tbler else 1
         return (
-            int(harq_fb.item()),
-            float(tbler.item()),
-            int(decoded_bits.item()),
+            ack,
+            tbler,
+            ack * tbs,
             sinr_true_db,
             sinr_eq_db,
+            mcs_lookup,
+            float(self.harq.rate_eff),
         )
 
     def step(self, action):
@@ -291,7 +328,16 @@ class DownlinkLAEnv(gym.Env):
 
         mcs_used = self.mcs_from_action(action)
         qm, coderate = self._mcs_properties(mcs_used)
-        self.harq.start_transmission(mcs_used, qm)
+        self.harq.start_transmission(mcs_used, qm, coderate)
+        _, tbs_t = tbler_from_phy(
+            self.phy_abs,
+            mcs_used,
+            db_to_lin(torch.tensor([0.0], dtype=torch.float32)),
+            self._num_re_t,
+            mcs_table_index=self.mcs_table_index,
+            mcs_category=self.mcs_category,
+        )
+        self.harq.tbs = int(tbs_t.reshape(-1)[0].item())
 
         reward = 0.0
         harq_seq = []
@@ -302,14 +348,19 @@ class DownlinkLAEnv(gym.Env):
         last_tbler = 0.0
         last_bits = 0
         last_sinr_eq = decision_gamma
+        last_mcs_lookup = mcs_used
+        last_rate_eff = coderate
         mi_sat = False
 
         # run whole TB: initial + retx until ACK/drop or slots run out
         while self._t < self.num_slots:
-            ack, tbler, bits, _, sinr_eq = self._phy_once(mcs_used)
+            ack, tbler, bits, _, sinr_eq, mcs_lookup, rate_eff = self._phy_once(
+                mcs_used
+            )
             harq_seq.append(ack)
             num_tx += 1
             last_tbler, last_bits, last_sinr_eq = tbler, bits, sinr_eq
+            last_mcs_lookup, last_rate_eff = mcs_lookup, rate_eff
             mi_sat = sinr_eq >= SNR_GRID_MAX_DB - 1e-6  # MI grid saturation
 
             if first_ack is None:
@@ -357,8 +408,10 @@ class DownlinkLAEnv(gym.Env):
             "ack": int(first_ack or 0),  # first-attempt ACK
             "tb_success": int(reward > 0),
             "mcs_used": mcs_used,
+            "mcs_lookup": last_mcs_lookup,
             "qm": qm,
             "coderate": coderate,
+            "rate_eff": last_rate_eff,
             "modulation": mod_from_qm(qm),
             "sinr_true_db": decision_gamma,
             "sinr_hat_db": decision_sinr_hat,
