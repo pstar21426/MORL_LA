@@ -1,6 +1,6 @@
-# Gym env: one step = one TB (initial MCS + internal HARQ retx).
-# State: [cqi_n, past_cqi×L, past_m×L, past_b×L] (unseen = -1). True SINR is not in state.
-# HARQ-IR: first TX uses raw SNR; retx SNR_eff = I^{-1}(mean I), same Qm, R/n, original TBS.
+# Gym env: 1 step = 1 TB (초기 전송 + HARQ 재전송).
+# State: [cqi_n, past_cqi×L, past_m×L, past_b×L] (unseen = -1). True SINR는 state에 포함되지 않음.
+# HARQ-IR: 초기 전송은 SNR 사용; 재전송 시 SNR_eff = I^{-1}(mean I), 같은 Qm, R/n, 초기 전송 TBS를 사용.
 
 from collections import deque
 
@@ -27,7 +27,7 @@ from harq import HarqProcess
 _MCS_RANGE = {1: (3, 28), 2: (2, 27)}
 _UNSEEN = -1.0
 
-
+# PHY seed 설정
 def seed_phy(seed):
     if seed is None:
         return
@@ -40,18 +40,19 @@ def _slot_uniform(ack_seed, slot):
     ss = np.random.SeedSequence([int(ack_seed) & 0xFFFFFFFF, int(slot) & 0xFFFFFFFF])
     return float(np.random.default_rng(ss).random())
 
-
+# 맨 앞 요소만 int로 반환
 def _item_int(x):
     if torch.is_tensor(x):
         return int(x.reshape(-1)[0].item())
     return int(x)
 
-
+# 과거 CQI, MCS, ACK 저장용 버퍼
 class DecisionHistory:
     def __init__(self, num_lags=3):
         self.num_lags = max(1, int(num_lags))
         self.reset()
 
+    # 버퍼 초기화(현재 hat sinr, self.cqi[3], self.mcs[3], self.ack[3])
     def reset(self):
         n = self.num_lags
         self.cqi = deque([_UNSEEN] * n, maxlen=n)
@@ -69,10 +70,10 @@ class DownlinkLAEnv(gym.Env):
 
     def __init__(
         self,
-        num_slots=400,
+        num_slots=1000,
         mcs_table_index=1,
         mcs_category=1,
-        num_allocated_re=1000,
+        num_allocated_re=300,
         sinr_mean_db=10.0,
         sinr_ar_rho=0.95,
         sinr_innov_std_db=2.5,
@@ -123,7 +124,7 @@ class DownlinkLAEnv(gym.Env):
         self.action_space = spaces.Discrete(self._mcs_span + 1)
 
         n = self.hist.num_lags
-        state_dim = 1 + 3 * n
+        state_dim = 1 + 3 * n # 10차원
         self.state_space = spaces.Box(
             low=np.full(state_dim, _UNSEEN, dtype=np.float32),
             high=np.ones(state_dim, dtype=np.float32),
@@ -141,21 +142,29 @@ class DownlinkLAEnv(gym.Env):
         self._pending_harq = [-1]
         self._fb_queue = deque()
         self._ack_seed = 2
-
+    
+    # --------------------------------------------------------------
+    # Sionna TBLER 계산, 0~2 인덱스가 테이블에 없어서 mcs_min으로 보정
     def mcs_from_action(self, action):
         return int(action) + self.mcs_min
 
     def action_from_mcs(self, mcs_index):
         return int(np.clip(mcs_index, self.mcs_min, self.mcs_max)) - self.mcs_min
-
+    # --------------------------------------------------------------
+    """
+    순수하게 sinr hat을 반환하기 위해서 있는 것인가?
+    그냥 메서드 정의할 필요없이 코드에서 바로 sinr_fb_db[idx]로 접근해도 되지 않나?
+    """
     def _sinr_hat_db(self, slot):
         idx = min(max(slot, 0), self.num_slots - 1)
         return float(self._sinr_fb_db[idx])
 
+    # 얘도 위랑 똑같음
     def _gamma_at(self, slot):
         idx = min(max(slot, 0), self.num_slots - 1)
         return float(self._sinr_true_db[idx])
 
+    # 현재 t 받으면 CQI 인덱스 반환
     def _report_cqi_at(self, slot):
         sinr_lin = db_to_lin(
             torch.tensor([self._sinr_hat_db(slot)], dtype=torch.float32)
@@ -170,6 +179,11 @@ class DownlinkLAEnv(gym.Env):
             bler_target=self.cqi_bler_target,
         )
 
+    # 과거 CQI, MCS, ACK 저장용 버퍼에서 현재 slot보다 작은 것들을 모두 제거
+    # _fb_queue: (slot, first_ack, cqi_n, mcs_norm)
+    """
+     이따와서 다시 볼게요
+    """
     def _drain_feedback(self, now_slot):
         drained = []
         while self._fb_queue and self._fb_queue[0][0] <= now_slot:
@@ -178,6 +192,8 @@ class DownlinkLAEnv(gym.Env):
             drained.append(int(first_ack))
         self._pending_harq = drained if drained else [-1]
 
+    # 현재 slot에서의 state 반환
+    # 평상시 시뮬레이션에서는 _state()만 호출하고, 테스트 시에는 특정 cqi_index를 넣으면 해당 cqi_index의 state를 반환
     def _state(self, cqi_index=None):
         if cqi_index is None:
             cqi_index = self._report_cqi_at(self._t)
@@ -186,6 +202,8 @@ class DownlinkLAEnv(gym.Env):
             dtype=np.float32,
         )
 
+    # 현재 slot에서의 info 반환
+    # 평상시 시뮬레이션에서는 _info()만 호출하고, 테스트 시에는 특정 cqi_index를 넣으면 해당 cqi_index의 info를 반환
     def _info(self, outcome=None, cqi_index=None):
         if cqi_index is None:
             cqi_index = self._report_cqi_at(self._t)
@@ -208,13 +226,16 @@ class DownlinkLAEnv(gym.Env):
             "cqi_delay_slots": self._delay_used,
             "ack_delay_slots": self.ack_delay_slots,
         }
+        # 테스트 시에는 특정 outcome을 넣으면 해당 outcome의 info를 반환
         if outcome is not None:
             info["outcome"] = outcome
         return info
 
+    # 환경 초기화
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
 
+        # 테스트 시에는 특정 seed를 넣으면 해당 seed의 sinr_true_db를 생성
         self._sinr_true_db = generate_sinr_db_trace(
             num_slots=self.num_slots,
             mean_db=self.sinr_mean_db,
@@ -226,6 +247,7 @@ class DownlinkLAEnv(gym.Env):
             mean_change_prob=self.sinr_mean_change_prob,
             seed=seed,
         )
+        # CQI 노이즈 추가
         self._sinr_fb_db, self._delay_used = add_cqi_noise(
             self._sinr_true_db,
             noise_std_db=self.cqi_noise_std_db,
@@ -241,8 +263,8 @@ class DownlinkLAEnv(gym.Env):
             if seed is not None
             else int(self.np_random.integers(0, 2**31 - 1))
         )
-        self._t = 0
-        self._last_decision_slot = 0
+        self._t = 0 
+        self._last_decision_slot = 0 # 마지막 결정 시점
         self._ever_decided = False
         self._pending_harq = [-1]
         self._fb_queue.clear()
@@ -250,8 +272,11 @@ class DownlinkLAEnv(gym.Env):
         cqi_index = self._report_cqi_at(self._t)
         return self._state(cqi_index), self._info(cqi_index=cqi_index)
 
+    # 현재 slot에서의 PHY 시뮬레이션 한 번 실행
+    # action에 대한 처리 핵심
     def _phy_once(self):
         sinr_eq_db = self.harq.accumulate(self._gamma_at(self._t))
+        # 초기 전송인 경우 초기 MCS 사용
         if self.harq.k == 0:
             mcs_lookup = self.harq.mcs
         else:
@@ -271,11 +296,13 @@ class DownlinkLAEnv(gym.Env):
             cb_size=self.harq.cb_size,
             num_cb=self.harq.num_cb,
         )
-        tbler = float(tbler_t.reshape(-1)[0].item())
+        tbler = float(tbler_t.reshape(-1)[0].item()) # tbler(0에서 1사이 값) 반환값만 사용
+        # 위의 tbler 값을 이용, [0,1] 사이 값을 랜덤으로 추출해서 tbler보다 작으면 0, 크면 1 반환
         ack = 0 if _slot_uniform(self._ack_seed, self._t) < tbler else 1
         return ack, tbler, ack * self.harq.tbs, sinr_eq_db
 
     def step(self, action):
+        # 현재 slot이 num_slots보다 크거나 같으면 종료
         if self._t >= self.num_slots:
             return self._state(), 0.0, False, True, self._info()
 
@@ -295,6 +322,7 @@ class DownlinkLAEnv(gym.Env):
             mcs_table_index=self.mcs_table_index,
             mcs_category=self.mcs_category,
         )
+        # 이따가 _phy_once() 메서드 호출하기 위한 정보 저장
         self.harq.start_transmission(
             mcs_used, qm, coderate, _item_int(tbs_t), _item_int(cb_t), _item_int(ncb_t)
         )
@@ -319,13 +347,13 @@ class DownlinkLAEnv(gym.Env):
             self._t += 1
 
             if ack == 1:
-                reward = qm * coderate / len(harq_seq)
+                reward = qm * coderate / len(harq_seq) # 성공 시 보상 qm * coderate / 사용 슬롯 수
                 self.harq.reset()
                 break
 
             dropped = self.harq.on_nack()
             if dropped:
-                reward = -self.drop_penalty
+                reward = -self.drop_penalty # 실패 시 보상(상수)
                 break
         else:
             truncated_mid_tb = True
@@ -342,11 +370,8 @@ class DownlinkLAEnv(gym.Env):
         self._ever_decided = True
 
         truncated = self._t >= self.num_slots
-        if truncated:
-            next_cqi = decision_cqi
-        else:
-            self._drain_feedback(self._t)
-            next_cqi = self._report_cqi_at(self._t)
+        self._drain_feedback(self._t)
+        next_cqi = self._report_cqi_at(self._t)
 
         outcome = {
             "ack": first_ack,
@@ -358,8 +383,9 @@ class DownlinkLAEnv(gym.Env):
             "sinr_hat_db": decision_sinr_hat,
             "cqi_index": decision_cqi,
             "sinr_eq_db": last_sinr_eq,
-            "tbler": last_tbler,
+            "tbler": first_tbler,
             "tbler_first": first_tbler,
+            "tbler_last": last_tbler,
             "decoded_bits": last_bits,
             "dropped": dropped,
             "truncated_mid_tb": truncated_mid_tb,

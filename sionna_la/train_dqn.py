@@ -20,11 +20,12 @@ def load_config(path):
 
 def _metrics(st, num_slots):
     n = max(st["tbs"], 1)
+    n_fin = max(st["tbs"] - st["n_trunc"], 1)
     return {
         "return": st["ret"],
         "tbs": st["tbs"],
         "first_tx_bler": 1.0 - st["n_ack"] / n,
-        "tb_fail": 1.0 - st["n_ok"] / n,
+        "tb_fail": 1.0 - st["n_ok"] / n_fin,
         "mean_mcs": st["mcs_sum"] / n,
         "mean_slots_tb": st["n_slots"] / n,
         "throughput": st["ret"] / max(num_slots, 1),
@@ -34,20 +35,21 @@ def _metrics(st, num_slots):
 
 def _rollout(env, choose_action, seed, on_transition=None):
     state, info = env.reset(seed=seed)
-    st = dict(ret=0.0, tbs=0, n_ack=0, n_slots=0, n_ok=0, mcs_sum=0.0, drops=0)
+    st = dict(ret=0.0, tbs=0, n_ack=0, n_slots=0, n_ok=0, n_trunc=0, mcs_sum=0.0, drops=0)
     done = False
     while not done:
         action = choose_action(state, info)
         next_state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         if on_transition is not None:
-            on_transition(state, action, reward, next_state, terminated)
+            on_transition(state, action, reward, next_state, done)
         out = info["outcome"]
         st["ret"] += reward
         st["tbs"] += 1
         st["n_ack"] += int(out["ack"])
         st["n_slots"] += int(out["num_slots"])
         st["n_ok"] += int(out["tb_success"])
+        st["n_trunc"] += int(out["truncated_mid_tb"])
         st["mcs_sum"] += float(out["mcs_used"])
         st["drops"] += int(out["dropped"])
         state = next_state
@@ -55,7 +57,7 @@ def _rollout(env, choose_action, seed, on_transition=None):
 
 
 def run_episode(env, agent, seed, *, train=True, greedy=False):
-    def on_transition(state, action, reward, next_state, terminated):
+    def on_transition(state, action, reward, next_state, done):
         if not train:
             return
         agent.push(
@@ -64,7 +66,7 @@ def run_episode(env, agent, seed, *, train=True, greedy=False):
                 action=action,
                 reward=float(reward),
                 next_state=next_state,
-                terminated=bool(terminated),
+                terminated=bool(done),
             )
         )
         agent.train_step()

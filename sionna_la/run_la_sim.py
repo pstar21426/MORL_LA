@@ -23,10 +23,10 @@ def rollout(env, policy, seed):
 
     log = {k: [] for k in (
         "state", "action", "reward", "next_state", "done",
-        "mcs_used", "ack", "tb_success", "dropped",
+        "mcs_used", "ack", "tb_success", "dropped", "truncated_mid_tb",
         "num_slots", "num_retx", "delta_tau",
         "sinr_true_db", "sinr_hat_db", "cqi_index", "cqi_norm",
-        "tbler", "decoded_bits",
+        "tbler", "tbler_last", "decoded_bits",
     )}
 
     done = False
@@ -50,6 +50,7 @@ def rollout(env, policy, seed):
         log["ack"].append(out["ack"])
         log["tb_success"].append(out["tb_success"])
         log["dropped"].append(out["dropped"])
+        log["truncated_mid_tb"].append(out["truncated_mid_tb"])
         log["num_slots"].append(out["num_slots"])
         log["num_retx"].append(out["num_retx"])
         log["delta_tau"].append(delta_tau)
@@ -58,23 +59,30 @@ def rollout(env, policy, seed):
         log["cqi_index"].append(cqi_index)
         log["cqi_norm"].append(cqi_norm)
         log["tbler"].append(out["tbler"])
+        log["tbler_last"].append(out["tbler_last"])
         log["decoded_bits"].append(out["decoded_bits"])
         state = next_state
 
     out = {k: np.asarray(v) for k, v in log.items()}
     out["sinr_true_trace"] = np.asarray(env._sinr_true_db, dtype=np.float64)
     out["sinr_hat_trace"] = np.asarray(env._sinr_fb_db, dtype=np.float64)
+    out["cqi_delay_slots"] = np.int64(env._delay_used)
     return out
 
 
 def metrics_from_rollout(res, num_slots):
     n = len(res["ack"])
+    finished = ~np.asarray(res["truncated_mid_tb"], dtype=bool)
+    n_fin = int(finished.sum())
+    tb_fail = (
+        float(1.0 - res["tb_success"][finished].mean()) if n_fin else 0.0
+    )
     return {
         "return": float(res["reward"].sum()),
         "throughput": float(res["reward"].sum() / num_slots),
         "tbs": n,
         "first_tx_bler": float(1.0 - res["ack"].mean()),
-        "tb_fail": float(1.0 - res["tb_success"].mean()),
+        "tb_fail": tb_fail,
         "mean_mcs": float(res["mcs_used"].mean()),
         "mean_slots_tb": float(res["num_slots"].mean()),
         "drops": int(res["dropped"].sum()),
@@ -176,12 +184,31 @@ def _flush_xlim(ax, x_max):
     ax.margins(x=0)
 
 
+def _tb_starts(slots_per_tb, total_slots):
+    starts = []
+    t = 0
+    for ns in slots_per_tb:
+        if t >= total_slots:
+            break
+        starts.append(t)
+        t += max(int(ns), 1)
+    return np.asarray(starts, dtype=int)
+
+
+def _running_mean(x):
+    x = np.asarray(x, dtype=np.float64)
+    if len(x) == 0:
+        return x
+    return np.cumsum(x) / np.arange(1, len(x) + 1)
+
+
 def plot_results(results, bler_target, out_path, num_slots, mcs_window=50):
-    fig, axs = plt.subplots(5, 1, figsize=(9, 13), sharex=True)
+    fig, axs = plt.subplots(6, 1, figsize=(9, 16), sharex=True)
 
     ref = next(iter(results.values()))
     slots = np.arange(num_slots)
     x_max = num_slots - 1
+    delay = int(np.asarray(ref.get("cqi_delay_slots", -1)).reshape(-1)[0])
 
     sinr_true = ref.get("sinr_true_trace")
     sinr_hat = ref.get("sinr_hat_trace")
@@ -189,57 +216,128 @@ def plot_results(results, bler_target, out_path, num_slots, mcs_window=50):
         sinr_true = _slot_hold(ref["sinr_true_db"], ref["num_slots"], num_slots)
     if sinr_hat is None:
         sinr_hat = _slot_hold(ref["sinr_hat_db"], ref["num_slots"], num_slots)
-    axs[0].plot(slots, sinr_true[:num_slots], label="true SINR", color="C0", lw=0.9)
+    axs[0].plot(slots, sinr_true[:num_slots], label="true SINR", color="0.35", lw=0.9)
     axs[0].plot(
         slots,
         sinr_hat[:num_slots],
         ":",
         label="SINR hat (pre-CQI)",
         color="C1",
-        alpha=0.85,
+        alpha=0.9,
     )
+    for i, (name, res) in enumerate(results.items()):
+        starts = _tb_starts(res["num_slots"], num_slots)
+        dropped = np.asarray(res["dropped"], dtype=bool)[: len(starts)]
+        if not np.any(dropped):
+            continue
+        t_drop = starts[dropped]
+        axs[0].scatter(
+            t_drop,
+            np.asarray(sinr_true)[np.clip(t_drop, 0, num_slots - 1)],
+            marker="x",
+            s=28,
+            linewidths=1.2,
+            color=f"C{i}",
+            zorder=5,
+            label=f"{name.upper()} drop",
+        )
     axs[0].set_ylabel("SINR [dB]")
+    delay_txt = f"cqi_delay={delay} slots" if delay >= 0 else "cqi_delay=?"
+    axs[0].set_title(f"Downlink LA (slot axis)  |  {delay_txt}")
     axs[0].legend(loc="best", fontsize=8)
     axs[0].grid(True, alpha=0.3)
-    axs[0].set_title("Downlink LA (slot axis)")
     _flush_xlim(axs[0], x_max)
 
     cqi_slot = _slot_hold(ref["cqi_index"], ref["num_slots"], num_slots)
-    axs[1].step(slots, cqi_slot, where="post", label="reported CQI", color="C2")
+    axs[1].step(slots, cqi_slot, where="post", label="reported CQI (TB hold)", color="C2")
     axs[1].set_ylabel("CQI index")
     axs[1].set_ylim(-0.5, 15.5)
     axs[1].legend(loc="best", fontsize=8)
     axs[1].grid(True, alpha=0.3)
     _flush_xlim(axs[1], x_max)
 
-    for name, res in results.items():
+    for i, (name, res) in enumerate(results.items()):
         mcs_slot = _slot_hold(res["mcs_used"], res["num_slots"], num_slots)
-        m = _rolling(mcs_slot, mcs_window)
-        axs[2].plot(np.arange(len(m)), m, label=name.upper())
-    axs[2].set_ylabel(f"MCS ({mcs_window}-slot roll mean)")
-    axs[2].legend(loc="best", fontsize=8)
+        axs[2].step(
+            slots,
+            mcs_slot,
+            where="post",
+            color=f"C{i}",
+            alpha=0.35,
+            lw=0.8,
+            label=f"{name.upper()} MCS",
+        )
+        axs[2].plot(
+            slots,
+            _rolling(mcs_slot, mcs_window),
+            color=f"C{i}",
+            lw=1.6,
+            label=f"{name.upper()} {mcs_window}-slot mean",
+        )
+    axs[2].set_ylabel("MCS")
+    axs[2].legend(loc="best", fontsize=7, ncol=2)
     axs[2].grid(True, alpha=0.3)
     _flush_xlim(axs[2], x_max)
 
-    for name, res in results.items():
-        y = _slot_cum_return(res["reward"], res["num_slots"], num_slots)
-        axs[3].plot(slots, y, label=name.upper())
-    axs[3].set_ylabel("cum reward")
-    axs[3].legend(loc="best", fontsize=8)
+    for i, (name, res) in enumerate(results.items()):
+        retx_slot = _slot_hold(res["num_retx"], res["num_slots"], num_slots)
+        axs[3].step(
+            slots,
+            retx_slot,
+            where="post",
+            color=f"C{i}",
+            lw=1.0,
+            label=f"{name.upper()} retx",
+        )
+        starts = _tb_starts(res["num_slots"], num_slots)
+        dropped = np.asarray(res["dropped"], dtype=bool)[: len(starts)]
+        if np.any(dropped):
+            t_drop = starts[dropped]
+            axs[3].scatter(
+                t_drop,
+                np.full(t_drop.shape, 2.15),
+                marker="x",
+                s=22,
+                color=f"C{i}",
+                zorder=5,
+                label=f"{name.upper()} drop",
+            )
+    axs[3].set_ylabel("HARQ retx")
+    axs[3].set_ylim(-0.2, 2.4)
+    axs[3].legend(loc="best", fontsize=7, ncol=2)
     axs[3].grid(True, alpha=0.3)
     _flush_xlim(axs[3], x_max)
 
     for name, res in results.items():
-        ack = res["ack"].astype(np.float64)
-        emp = 1.0 - np.cumsum(ack) / np.arange(1, len(ack) + 1)
-        emp_slot = _slot_hold(emp, res["num_slots"], num_slots)
-        axs[4].plot(slots, emp_slot, label=f"{name.upper()} first-tx BLER")
-    axs[4].axhline(bler_target, color="k", ls="--", label="target")
-    axs[4].set_ylabel("emp BLER")
-    axs[4].set_xlabel("slot")
+        y = _slot_cum_return(res["reward"], res["num_slots"], num_slots)
+        axs[4].plot(slots, y, label=name.upper())
+    axs[4].set_ylabel("cum reward")
     axs[4].legend(loc="best", fontsize=8)
     axs[4].grid(True, alpha=0.3)
     _flush_xlim(axs[4], x_max)
+
+    for i, (name, res) in enumerate(results.items()):
+        ack = res["ack"].astype(np.float64)
+        emp = 1.0 - _running_mean(ack)
+        emp_slot = _slot_hold(emp, res["num_slots"], num_slots)
+        axs[5].plot(slots, emp_slot, color=f"C{i}", lw=1.5, label=f"{name.upper()} emp 1st-tx")
+        pred = _running_mean(res["tbler"])
+        pred_slot = _slot_hold(pred, res["num_slots"], num_slots)
+        axs[5].plot(
+            slots,
+            pred_slot,
+            color=f"C{i}",
+            ls=":",
+            lw=1.3,
+            label=f"{name.upper()} pred TBLER",
+        )
+    axs[5].axhline(bler_target, color="k", ls="--", label="target")
+    axs[5].set_ylabel("first-tx BLER")
+    axs[5].set_xlabel("slot")
+    axs[5].set_ylim(-0.02, 1.02)
+    axs[5].legend(loc="best", fontsize=7, ncol=2)
+    axs[5].grid(True, alpha=0.3)
+    _flush_xlim(axs[5], x_max)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)

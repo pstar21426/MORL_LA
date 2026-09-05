@@ -9,8 +9,7 @@ conda activate sionna_la
 cd sionna_la
 python run_la_sim.py
 python train_dqn.py --episodes 40 --seed 0
-python check_obs/check_obs.py --both-delays
-python check_obs/check_obs.py --dqn --checkpoint outputs/dqn_seed0.pt
+python check_obs/check_obs.py
 ```
 
 | 파일 | 역할 |
@@ -23,7 +22,7 @@ python check_obs/check_obs.py --dqn --checkpoint outputs/dqn_seed0.pt
 | `train_dqn.py` | 간단 DQN 학습 + ILLA/OLLA 비교 eval |
 | `plot_t_return.py` | slot vs cum return (ILLA/OLLA/DQN, 에피소드 1판) |
 | `plot_dqn_train.py` | DQN 학습 곡선 (episode vs return) |
-| `check_obs/check_obs.py` | 관측/state 검증 (CSI delay + state + PHY + ILLA oracle); `--dqn`으로 greedy/ILLA 비교 |
+| `check_obs/check_obs.py` | A: CSI overlay / C·D: state tables (`ack_delay=0`) |
 | `configs/downlink_la.yaml` | 파라미터 |
 
 ```python
