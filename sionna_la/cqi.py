@@ -59,17 +59,21 @@ def mcs_qm_rate(mcs_index, mcs_min, mcs_max, mcs_table_index=1):
 
 
 def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1):
-    # same Qm: highest coderate <= R_eff, else lowest-rate MCS of that Qm
-    cands = [
+    # rate_eff: coderate / 재전송 횟수
+    # qm: 초전송의 Qm
+    
+    cands = [ # cands: Qm이 초전송과 같은 MCS만 고름
         (m, r)
         for m, qq, r in _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max)
         if qq == int(qm)
     ]
-    if not cands:
+    if not cands: 
         return int(mcs_min)
     below = [(m, r) for m, r in cands if r <= float(rate_eff) + 1e-12]
+    # 위에서 고른 cands 중 coderate가 R/n 이하인 것 중 가장 높은 rate의 MCS 반환
     if below:
         return int(max(below, key=lambda x: x[1])[0])
+    # 그런 MCS가 없으면 그 Qm에서 가장 낮은 rate의 MCS 반환
     return int(min(cands, key=lambda x: x[1])[0])
 
 
@@ -149,8 +153,10 @@ def tbler_from_phy(
         cb_sz = _match_len(_as_int32_vec(cb_size), n)
         n_cb = _match_len(_as_int32_vec(num_cb), n)
         tbs = (n_cb * cb_sz).to(torch.int32)
+    # 위에서 길이 맞춰준 벡터로 BLER 계산
     bler = phy_abs.get_bler(mcs, mcs_table_index, mcs_category, cb_sz, sinr)
     one = torch.ones((), dtype=bler.dtype, device=bler.device)
+    # 위에서 계산한 BLER로 TBLER 계산
     tbler = one - torch.pow(one - bler, n_cb.to(dtype=bler.dtype))
     return tbler, tbs
 
