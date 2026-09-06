@@ -15,7 +15,7 @@ def _pam_constellation(order):
     a = 2.0 * np.arange(order) - (order - 1)
     return a / np.sqrt((order**2 - 1) / 3.0)
 
-
+# PAM MI 계산
 def _pam_mi(order, snr_lin):
     x = _pam_constellation(order)
     sigma = np.sqrt(1.0 / snr_lin)[:, None]
@@ -32,29 +32,29 @@ def _pam_mi(order, snr_lin):
         acc += (logsumexp(arg, axis=-1) / np.log(2.0)) @ weight
     return np.log2(order) - acc / order
 
-
+# QAM MI 계산, PAM MI의 두배
 def _qam_mi(qm, snr_lin):
     return 2.0 * _pam_mi(int(2 ** (qm // 2)), snr_lin)
 
-
+# MI 테이블 생성
 def _mi_table(mod):
     if mod not in _MI_TABLES:
         snr_lin = 10.0 ** (_SNR_DB_GRID / 10.0)
         _MI_TABLES[mod] = _qam_mi(MOD_TO_QM[mod], snr_lin)
     return _MI_TABLES[mod]
 
-
+# QM -> MOD로 변환  
 def mod_from_qm(qm):
     return QM_TO_MOD[int(qm)]
 
-
+# SNR_DB -> MI
 def mi_from_snr_db(mod, snr_db):
     return float(np.interp(snr_db, _SNR_DB_GRID, _mi_table(mod)))
-# SNR_DB -> MI
 
+# MI -> SNR_DB
 def snr_db_from_mi(mod, mi):
     return float(np.interp(mi, _mi_table(mod), _SNR_DB_GRID))
-# MI -> SNR_DB
+
 
 
 class HarqProcess:

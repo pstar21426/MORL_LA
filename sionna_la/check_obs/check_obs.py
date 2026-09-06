@@ -1,20 +1,3 @@
-#!/usr/bin/env python3
-"""
-Observation checks for DownlinkLAEnv (ack_delay=0).
-
-  A) CSI overlay plot: gamma_true / gamma_hat / CQI
-  C) Table: state[0] == cqi_index / 15
-  D) Table: past (cqi, mcs, ack) aligned by decision index
-
-E (ACK delay timing) skipped — this script forces ack_delay_slots=0.
-
-Run from sionna_la/:
-  python check_obs/check_obs.py
-  python check_obs/check_obs.py --num-slots 200 --policy olla --table-rows 20
-"""
-
-from __future__ import annotations
-
 import argparse
 import csv
 import sys
@@ -29,8 +12,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from la_env import DownlinkLAEnv, seed_phy  # noqa: E402
-from policies import make_baseline_policy  # noqa: E402
+from la_env import DownlinkLAEnv, seed_phy
+from policies import make_baseline_policy
 
 _UNSEEN = -1.0
 
@@ -233,7 +216,7 @@ def _write_md_table(path: Path, title: str, headers: list[str], rows: list[list]
 
 
 def table_c_state0(log: dict, tol: float = 1e-5):
-    """C: state[0] == cqi_index / 15."""
+    # C: state[0](현재 CQI)가 cqi_index / 15와 일치하는지 확인
     headers = ["tb", "slot", "cqi_index", "state[0]", "cqi/15", "ok"]
     rows = []
     n_fail = 0
@@ -251,10 +234,7 @@ def table_c_state0(log: dict, tol: float = 1e-5):
 
 
 def table_d_history(log: dict, tol: float = 1e-5):
-    """
-    D (ack_delay=0): at decision t+1, history lag0 must be TB t's
-    (cqi_norm, mcs_norm, ack). Also list all L lags for readability.
-    """
+    # D: history(cqi,mcs,ack)들이 decision index와 확인하는지, 업데이트가 잘 되는지 확인
     L = int(log["state_num_lags"])
     _, sl_cqi, sl_m, sl_b = _state_slices(L)
     headers = [
@@ -272,8 +252,8 @@ def table_d_history(log: dict, tol: float = 1e-5):
     rows = []
     n_fail = 0
 
-    # For each next_state after TB i (except last terminal), check lag0 = TB i outcome.
-    # Full lag table: at decision i, lag k should equal TB (i-1-k) if i-1-k >= 0.
+    # 각 next_state(TB i) 에 대해, lag0 = TB i 의 outcome과 일치하는지 확인
+    # 전체 lag table: decision i 에서, lag k 는 i-1-k >= 0 인 경우 TB (i-1-k)와 같아야 함
     n = len(log["state"])
     for i in range(n):
         st = log["state"][i]
@@ -345,7 +325,7 @@ def run(
     log = rollout(env, policy, seed=seed)
     tag = f"{policy_name}_seed{seed}"
 
-    # --- A: CSI overlay ---
+    # --- A: CSI 오버레이 ---
     stats = check_csi_numbers(log)
     plot_path = plot_csi_overlay(log, policy_name, out_dir)
     noise = stats["noise_cfg_db"]
@@ -366,7 +346,7 @@ def run(
     )
     print(f"  plot -> {plot_path}")
 
-    # --- C: state[0] table ---
+    # --- C: state[0] 테이블 ---
     h_c, rows_c, fail_c = table_c_state0(log)
     _print_table("C: state[0] == cqi/15", h_c, rows_c, table_rows)
     csv_c = out_dir / f"obs_table_C_{tag}.csv"
@@ -377,7 +357,7 @@ def run(
     print(f"  table -> {md_c}")
     print(f"  csv   -> {csv_c}")
 
-    # --- D: history alignment table ---
+    # --- D: 히스토리 테이블 ---
     h_d, rows_d, fail_d = table_d_history(log)
     _print_table("D: history (cqi,mcs,ack) aligned (ack_delay=0)", h_d, rows_d, table_rows)
     csv_d = out_dir / f"obs_table_D_{tag}.csv"

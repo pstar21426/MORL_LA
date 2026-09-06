@@ -24,7 +24,7 @@ def generate_sinr_db_trace(
 
     if mean_range_db is None:
         mu = np.full(num_slots, float(mean_db))
-    else:
+    else: # 매 슬롯마다 mu_t를 설정,지금은 작동하지 않게 mu 고정
         lo, hi = mean_range_db
         mu = np.empty(num_slots)
         current = rng.uniform(lo, hi)
@@ -49,6 +49,7 @@ def add_cqi_noise(
     seed=None,
     sinr_min_db=None,
     sinr_max_db=None,
+
 ):
     # delay_slots=None -> pick fixed delay in {1,2,3,4} once per episode
     rng = np.random.default_rng(seed)

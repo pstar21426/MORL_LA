@@ -151,10 +151,7 @@ class DownlinkLAEnv(gym.Env):
     def action_from_mcs(self, mcs_index):
         return int(np.clip(mcs_index, self.mcs_min, self.mcs_max)) - self.mcs_min
     # --------------------------------------------------------------
-    """
-    순수하게 sinr hat을 반환하기 위해서 있는 것인가?
-    그냥 메서드 정의할 필요없이 코드에서 바로 sinr_fb_db[idx]로 접근해도 되지 않나?
-    """
+    
     def _sinr_hat_db(self, slot):
         idx = min(max(slot, 0), self.num_slots - 1)
         return float(self._sinr_fb_db[idx])
@@ -181,9 +178,7 @@ class DownlinkLAEnv(gym.Env):
 
     # 과거 CQI, MCS, ACK 저장용 버퍼에서 현재 slot보다 작은 것들을 모두 제거
     # _fb_queue: (slot, first_ack, cqi_n, mcs_norm)
-    """
-     이따와서 다시 볼게요
-    """
+    
     def _drain_feedback(self, now_slot):
         drained = []
         while self._fb_queue and self._fb_queue[0][0] <= now_slot:
