@@ -3,8 +3,8 @@
 seed=0  step_up=0.1  step_down=0.9
 
 ## OLLA offset vs ACK
-- offset step mismatches (ignoring ±20 clip): **0** / 855
-- offset range: [-16.80, 1.00] dB
+- offset step mismatches (ignoring ±20 clip): **0** / 858
+- offset range: [-15.50, 0.50] dB
 - plot: `obs_olla_offset_seed0.png`
 - table: `obs_table_olla_offset_olla_seed0.md`
 
@@ -15,8 +15,8 @@ seed=0  step_up=0.1  step_down=0.9
 
 | policy | mean tbler_first | emp 1st-tx BLER | diff |
 | --- | --- | --- | --- |
-| ILLA | 0.2874 | 0.2792 | +0.0082 |
-| OLLA | 0.1260 | 0.1193 | +0.0067 |
+| ILLA | 0.3218 | 0.3203 | +0.0015 |
+| OLLA | 0.1259 | 0.1177 | +0.0082 |
 
 ## DDQN
 - greedy replay / vs ILLA scatter: `check_obs/check_ddqn.py`

@@ -203,7 +203,7 @@ def _running_mean(x):
 
 
 def plot_results(results, bler_target, out_path, num_slots, mcs_window=50):
-    fig, axs = plt.subplots(6, 1, figsize=(9, 16), sharex=True)
+    fig, axs = plt.subplots(5, 1, figsize=(9, 13.5), sharex=True)
 
     ref = next(iter(results.values()))
     slots = np.arange(num_slots)
@@ -225,22 +225,6 @@ def plot_results(results, bler_target, out_path, num_slots, mcs_window=50):
         color="C1",
         alpha=0.9,
     )
-    for i, (name, res) in enumerate(results.items()):
-        starts = _tb_starts(res["num_slots"], num_slots)
-        dropped = np.asarray(res["dropped"], dtype=bool)[: len(starts)]
-        if not np.any(dropped):
-            continue
-        t_drop = starts[dropped]
-        axs[0].scatter(
-            t_drop,
-            np.asarray(sinr_true)[np.clip(t_drop, 0, num_slots - 1)],
-            marker="x",
-            s=28,
-            linewidths=1.2,
-            color=f"C{i}",
-            zorder=5,
-            label=f"{name.upper()} drop",
-        )
     axs[0].set_ylabel("SINR [dB]")
     delay_txt = f"cqi_delay={delay} slots" if delay >= 0 else "cqi_delay=?"
     axs[0].set_title(f"Downlink LA (slot axis)  |  {delay_txt}")
@@ -279,51 +263,22 @@ def plot_results(results, bler_target, out_path, num_slots, mcs_window=50):
     axs[2].grid(True, alpha=0.3)
     _flush_xlim(axs[2], x_max)
 
-    for i, (name, res) in enumerate(results.items()):
-        retx_slot = _slot_hold(res["num_retx"], res["num_slots"], num_slots)
-        axs[3].step(
-            slots,
-            retx_slot,
-            where="post",
-            color=f"C{i}",
-            lw=1.0,
-            label=f"{name.upper()} retx",
-        )
-        starts = _tb_starts(res["num_slots"], num_slots)
-        dropped = np.asarray(res["dropped"], dtype=bool)[: len(starts)]
-        if np.any(dropped):
-            t_drop = starts[dropped]
-            axs[3].scatter(
-                t_drop,
-                np.full(t_drop.shape, 2.15),
-                marker="x",
-                s=22,
-                color=f"C{i}",
-                zorder=5,
-                label=f"{name.upper()} drop",
-            )
-    axs[3].set_ylabel("HARQ retx")
-    axs[3].set_ylim(-0.2, 2.4)
-    axs[3].legend(loc="best", fontsize=7, ncol=2)
-    axs[3].grid(True, alpha=0.3)
-    _flush_xlim(axs[3], x_max)
-
     for name, res in results.items():
         y = _slot_cum_return(res["reward"], res["num_slots"], num_slots)
-        axs[4].plot(slots, y, label=name.upper())
-    axs[4].set_ylabel("cum reward")
-    axs[4].legend(loc="best", fontsize=8)
-    axs[4].grid(True, alpha=0.3)
-    _flush_xlim(axs[4], x_max)
+        axs[3].plot(slots, y, label=name.upper())
+    axs[3].set_ylabel("cum reward")
+    axs[3].legend(loc="best", fontsize=8)
+    axs[3].grid(True, alpha=0.3)
+    _flush_xlim(axs[3], x_max)
 
     for i, (name, res) in enumerate(results.items()):
         ack = res["ack"].astype(np.float64)
         emp = 1.0 - _running_mean(ack)
         emp_slot = _slot_hold(emp, res["num_slots"], num_slots)
-        axs[5].plot(slots, emp_slot, color=f"C{i}", lw=1.5, label=f"{name.upper()} emp 1st-tx")
+        axs[4].plot(slots, emp_slot, color=f"C{i}", lw=1.5, label=f"{name.upper()} emp 1st-tx")
         pred = _running_mean(res["tbler"])
         pred_slot = _slot_hold(pred, res["num_slots"], num_slots)
-        axs[5].plot(
+        axs[4].plot(
             slots,
             pred_slot,
             color=f"C{i}",
@@ -331,13 +286,13 @@ def plot_results(results, bler_target, out_path, num_slots, mcs_window=50):
             lw=1.3,
             label=f"{name.upper()} pred TBLER",
         )
-    axs[5].axhline(bler_target, color="k", ls="--", label="target")
-    axs[5].set_ylabel("first-tx BLER")
-    axs[5].set_xlabel("slot")
-    axs[5].set_ylim(-0.02, 1.02)
-    axs[5].legend(loc="best", fontsize=7, ncol=2)
-    axs[5].grid(True, alpha=0.3)
-    _flush_xlim(axs[5], x_max)
+    axs[4].axhline(bler_target, color="k", ls="--", label="target")
+    axs[4].set_ylabel("first-tx BLER")
+    axs[4].set_xlabel("slot")
+    axs[4].set_ylim(-0.02, 1.02)
+    axs[4].legend(loc="best", fontsize=7, ncol=2)
+    axs[4].grid(True, alpha=0.3)
+    _flush_xlim(axs[4], x_max)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
