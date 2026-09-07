@@ -26,23 +26,26 @@ CQI_MAX = 15
 _MCS_QM_RATE = {}
 
 
-def _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max):
-    key = (int(mcs_table_index), int(mcs_min), int(mcs_max))
+def _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max, mcs_category=1):
+    is_pusch = int(mcs_category) == 0
+    key = (int(mcs_table_index), int(mcs_min), int(mcs_max), int(is_pusch))
     if key not in _MCS_QM_RATE:
         rows = []
         for m in range(int(mcs_min), int(mcs_max) + 1):
             qm, rate = decode_mcs_index(
                 torch.tensor([m], dtype=torch.int32),
                 table_index=mcs_table_index,
-                is_pusch=False,
+                is_pusch=is_pusch,
             )
             rows.append((m, int(qm.item()), float(rate.item())))
         _MCS_QM_RATE[key] = rows
     return _MCS_QM_RATE[key]
 
 
-def build_cqi_to_mcs(mcs_min, mcs_max, mcs_table_index=1):
-    rows = _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max)
+def build_cqi_to_mcs(mcs_min, mcs_max, mcs_table_index=1, mcs_category=1):
+    rows = _mcs_qm_rate_table(
+        mcs_table_index, mcs_min, mcs_max, mcs_category=mcs_category
+    )
     se_mcs = {m: qm * rate for m, qm, rate in rows}
     mapping = {0: int(mcs_min)}
     for q, se in _CQI_SE.items():
@@ -50,22 +53,26 @@ def build_cqi_to_mcs(mcs_min, mcs_max, mcs_table_index=1):
     return mapping
 
 
-def mcs_qm_rate(mcs_index, mcs_min, mcs_max, mcs_table_index=1):
+def mcs_qm_rate(mcs_index, mcs_min, mcs_max, mcs_table_index=1, mcs_category=1):
     mcs_index = int(mcs_index)
-    for m, qm, rate in _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max):
+    for m, qm, rate in _mcs_qm_rate_table(
+        mcs_table_index, mcs_min, mcs_max, mcs_category=mcs_category
+    ):
         if m == mcs_index:
             return qm, rate
     raise ValueError(f"MCS {mcs_index} not in [{mcs_min}, {mcs_max}]")
 
 
-def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1):
+def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1, mcs_category=1):
     # rate_eff: coderate / 재전송 횟수
     # qm: 초전송의 Qm
     # 그냥 mi를 더하면 금방 상한을 쳐서 재전송 효율이 너무 좋아져 에이전트가 과도한 재전송을 하게 됨
     
     cands = [ # cands: Qm이 초전송과 같은 MCS만 고름
         (m, r)
-        for m, qq, r in _mcs_qm_rate_table(mcs_table_index, mcs_min, mcs_max)
+        for m, qq, r in _mcs_qm_rate_table(
+            mcs_table_index, mcs_min, mcs_max, mcs_category=mcs_category
+        )
         if qq == int(qm)
     ]
     if not cands: 
@@ -157,9 +164,13 @@ def tbler_from_phy(
         tbs = (n_cb * cb_sz).to(torch.int32)
     # 위에서 길이 맞춰준 벡터로 BLER 계산
     bler = phy_abs.get_bler(mcs, mcs_table_index, mcs_category, cb_sz, sinr)
+    # Missing table entries are Inf; clamp so ACK sampling cannot flip to always-ACK.
+    bler = torch.nan_to_num(bler, nan=1.0, posinf=1.0, neginf=1.0)
+    bler = torch.clamp(bler, 0.0, 1.0)
     one = torch.ones((), dtype=bler.dtype, device=bler.device)
     # 위에서 계산한 BLER로 TBLER 계산
     tbler = one - torch.pow(one - bler, n_cb.to(dtype=bler.dtype))
+    tbler = torch.clamp(tbler, 0.0, 1.0)
     return tbler, tbs
 
 

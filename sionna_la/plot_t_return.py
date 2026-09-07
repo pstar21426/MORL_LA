@@ -12,7 +12,7 @@ from sionna.sys import PHYAbstraction
 
 from ddqn import DDQNAgent
 from la_env import DownlinkLAEnv, seed_phy
-from train_ddqn import load_config
+from train_ddqn import load_config, resolve_held_out_eval_seed
 
 
 def slot_cum_return(rewards, slots_per_tb, total_slots):
@@ -99,7 +99,12 @@ def main():
         type=Path,
         default=Path(__file__).resolve().parent / "configs" / "downlink_la.yaml",
     )
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="eval seed; overlapping training seeds are shifted like train_ddqn",
+    )
     p.add_argument("--out-dir", type=Path, default=None)
     p.add_argument("--illa-npz", type=Path, default=None)
     p.add_argument("--olla-npz", type=Path, default=None)
@@ -107,7 +112,13 @@ def main():
     args = p.parse_args()
 
     cfg = load_config(args.config)
-    seed = args.seed
+    requested = int(args.seed)
+    seed, train_seed, episodes = resolve_held_out_eval_seed(cfg, requested)
+    if seed != requested:
+        print(
+            f"eval seed {requested} overlaps training "
+            f"[{train_seed}, {train_seed + episodes}); using {seed}"
+        )
     out_dir = args.out_dir or Path(cfg.get("out_dir", "outputs"))
     if not out_dir.is_absolute():
         out_dir = Path(__file__).resolve().parent / out_dir

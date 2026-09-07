@@ -119,7 +119,10 @@ class DownlinkLAEnv(gym.Env):
         self.mcs_min, self.mcs_max = _MCS_RANGE[self.mcs_table_index]
         self._mcs_span = self.mcs_max - self.mcs_min
         self._cqi_to_mcs = build_cqi_to_mcs(
-            self.mcs_min, self.mcs_max, mcs_table_index=self.mcs_table_index
+            self.mcs_min,
+            self.mcs_max,
+            mcs_table_index=self.mcs_table_index,
+            mcs_category=self.mcs_category,
         )
         self.action_space = spaces.Discrete(self._mcs_span + 1)
 
@@ -207,7 +210,8 @@ class DownlinkLAEnv(gym.Env):
             "sinr_hat_db": self._sinr_hat_db(self._t),
             "cqi_index": int(cqi_index),
             "cqi_norm": normalize_cqi(cqi_index),
-            "harq_feedbacks": list(self._pending_harq),
+            # delay가 끝난 초전송 ACK들. 없으면 [-1]. outcome["harq_seq"]와 다름
+            "first_acks": list(self._pending_harq),
             "mcs_table_index": self.mcs_table_index,
             "mcs_category": self.mcs_category,
             "mcs_min": self.mcs_min,
@@ -281,6 +285,7 @@ class DownlinkLAEnv(gym.Env):
                 self.mcs_min,
                 self.mcs_max,
                 mcs_table_index=self.mcs_table_index,
+                mcs_category=self.mcs_category,
             )
         tbler_t, _ = tbler_from_phy(
             self.phy_abs,
@@ -299,7 +304,14 @@ class DownlinkLAEnv(gym.Env):
     def step(self, action):
         # 현재 slot이 num_slots보다 크거나 같으면 종료
         if self._t >= self.num_slots:
-            return self._state(), 0.0, False, True, self._info()
+            cqi_index = self._report_cqi_at(self._t)
+            return (
+                self._state(cqi_index),
+                0.0,
+                False,
+                True,
+                self._info(self._idle_outcome(cqi_index), cqi_index=cqi_index),
+            )
 
         decision_slot = self._t
         decision_cqi = self._report_cqi_at(self._t)
@@ -309,7 +321,11 @@ class DownlinkLAEnv(gym.Env):
 
         mcs_used = self.mcs_from_action(action)
         qm, coderate = mcs_qm_rate(
-            mcs_used, self.mcs_min, self.mcs_max, self.mcs_table_index
+            mcs_used,
+            self.mcs_min,
+            self.mcs_max,
+            self.mcs_table_index,
+            mcs_category=self.mcs_category,
         )
         tbs_t, cb_t, ncb_t = tb_layout_from_mcs(
             mcs_used,
@@ -369,7 +385,79 @@ class DownlinkLAEnv(gym.Env):
         self._drain_feedback(self._t)
         next_cqi = self._report_cqi_at(self._t)
 
-        outcome = {
+        return (
+            self._state(next_cqi),
+            float(reward),
+            False,
+            truncated,
+            self._info(
+                self._tb_outcome(
+                    first_ack=first_ack,
+                    reward=reward,
+                    mcs_used=mcs_used,
+                    qm=qm,
+                    coderate=coderate,
+                    decision_gamma=decision_gamma,
+                    decision_sinr_hat=decision_sinr_hat,
+                    decision_cqi=decision_cqi,
+                    last_sinr_eq=last_sinr_eq,
+                    first_tbler=first_tbler,
+                    last_tbler=last_tbler,
+                    last_bits=last_bits,
+                    dropped=dropped,
+                    truncated_mid_tb=truncated_mid_tb,
+                    num_tx=num_tx,
+                    harq_seq=harq_seq,
+                    decision_slot=decision_slot,
+                ),
+                cqi_index=next_cqi,
+            ),
+        )
+
+    def _idle_outcome(self, cqi_index):
+        gamma = self._gamma_at(self._t)
+        return self._tb_outcome(
+            first_ack=0,
+            reward=0.0,
+            mcs_used=self.mcs_min,
+            qm=0,
+            coderate=0.0,
+            decision_gamma=gamma,
+            decision_sinr_hat=self._sinr_hat_db(self._t),
+            decision_cqi=int(cqi_index),
+            last_sinr_eq=gamma,
+            first_tbler=0.0,
+            last_tbler=0.0,
+            last_bits=0,
+            dropped=False,
+            truncated_mid_tb=False,
+            num_tx=0,
+            harq_seq=[],
+            decision_slot=int(self._t),
+        )
+
+    @staticmethod
+    def _tb_outcome(
+        *,
+        first_ack,
+        reward,
+        mcs_used,
+        qm,
+        coderate,
+        decision_gamma,
+        decision_sinr_hat,
+        decision_cqi,
+        last_sinr_eq,
+        first_tbler,
+        last_tbler,
+        last_bits,
+        dropped,
+        truncated_mid_tb,
+        num_tx,
+        harq_seq,
+        decision_slot,
+    ):
+        return {
             "ack": first_ack,
             "tb_success": int(reward > 0),
             "mcs_used": mcs_used,
@@ -387,16 +475,9 @@ class DownlinkLAEnv(gym.Env):
             "truncated_mid_tb": truncated_mid_tb,
             "num_slots": num_tx,
             "num_retx": max(num_tx - 1, 0),
-            "harq_feedbacks": list(harq_seq),
+            "harq_seq": list(harq_seq),
             "decision_slot": decision_slot,
         }
-        return (
-            self._state(next_cqi),
-            float(reward),
-            False,
-            truncated,
-            self._info(outcome, cqi_index=next_cqi),
-        )
 
     @classmethod
     def from_config(cls, cfg, phy_abs=None):

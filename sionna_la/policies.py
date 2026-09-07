@@ -18,11 +18,14 @@ def _mcs_from_cqi(cqi_index, cqi_to_mcs):
 class IllaPolicy:
     name = "illa"
 
-    def __init__(self, mcs_min, mcs_max, mcs_table_index=1):
+    def __init__(self, mcs_min, mcs_max, mcs_table_index=1, mcs_category=1):
         self.mcs_min = int(mcs_min)
         self.mcs_max = int(mcs_max)
         self._cqi_to_mcs = build_cqi_to_mcs(
-            self.mcs_min, self.mcs_max, mcs_table_index=mcs_table_index
+            self.mcs_min,
+            self.mcs_max,
+            mcs_table_index=mcs_table_index,
+            mcs_category=mcs_category,
         )
 
     def reset(self):
@@ -72,7 +75,10 @@ class OllaPolicy:
             self.step_down_db = float(step_down_db)
 
         self._cqi_to_mcs = build_cqi_to_mcs(
-            self.mcs_min, self.mcs_max, mcs_table_index=self.mcs_table_index
+            self.mcs_min,
+            self.mcs_max,
+            mcs_table_index=self.mcs_table_index,
+            mcs_category=self.mcs_category,
         )
         self._cqi_to_sinr_db = calibrate_cqi_to_sinr_db(
             self.phy_abs,
@@ -90,7 +96,7 @@ class OllaPolicy:
         self._offset_db = 0.0
 
     def __call__(self, state, info):
-        fb_seq = info.get("harq_feedbacks") or [-1]
+        fb_seq = info.get("first_acks") or [-1]
         for fb in fb_seq:
             if int(fb) == -1:
                 continue
@@ -148,6 +154,7 @@ def make_baseline_policy(name, env, bler_target=0.1, olla_step_up_db=None):
             mcs_min=env.mcs_min,
             mcs_max=env.mcs_max,
             mcs_table_index=env.mcs_table_index,
+            mcs_category=env.mcs_category,
         )
     if name == "olla":
         kwargs = dict(

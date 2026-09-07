@@ -47,7 +47,7 @@ save_npz: true
 train:
   episodes: 200
   log_every: 20
-  eval_seeds: [1, 2, 3]   # 학습 seed 0이랑 겹치지 않게
+  eval_seeds: [1, 2, 3]   # 학습은 seed..seed+episodes-1. 겹치면 train_ddqn이 밀어냄
 
 ddqn:
   hidden: 256

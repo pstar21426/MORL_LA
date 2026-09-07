@@ -19,6 +19,7 @@ if str(_ROOT) not in sys.path:
 from ddqn import DDQNAgent
 from la_env import DownlinkLAEnv, seed_phy
 from policies import make_baseline_policy
+from train_ddqn import resolve_held_out_eval_seed
 
 
 def load_config(path: Path) -> dict:
@@ -41,7 +42,12 @@ def load_agent(ckpt: Path, env: DownlinkLAEnv) -> DDQNAgent:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=Path, default=_ROOT / "configs" / "downlink_la.yaml")
-    p.add_argument("--seed", type=int, default=1, help="eval seed (avoid train seed 0)")
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="eval seed; overlapping training seeds are shifted like train_ddqn",
+    )
     p.add_argument("--checkpoint", type=Path, default=None)
     p.add_argument(
         "--out-dir",
@@ -51,6 +57,12 @@ def main():
     args = p.parse_args()
 
     cfg = load_config(args.config)
+    eval_seed, train_seed, episodes = resolve_held_out_eval_seed(cfg, args.seed)
+    if eval_seed != int(args.seed):
+        print(
+            f"eval seed {args.seed} overlaps training "
+            f"[{train_seed}, {train_seed + episodes}); using {eval_seed}"
+        )
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt = args.checkpoint
@@ -74,28 +86,31 @@ def main():
         olla_step_up_db=cfg.get("olla_step_up_db"),
     )
 
-    seed_phy(args.seed)
-    state, info = env.reset(seed=args.seed)
+    seed_phy(eval_seed)
+    state, info = env.reset(seed=eval_seed)
     illa.reset()
     olla.reset()
 
-    ddqn_a, illa_a, olla_a, replay = [], [], [], []
+    states, ddqn_a, illa_a, olla_a = [], [], [], []
     done = False
     while not done:
-        a_ddqn = agent.select_action(state, greedy=True)
-        replay.append(int(agent.select_action(state, greedy=True)))
+        states.append(np.asarray(state, dtype=np.float32).copy())
+        a_ddqn = int(agent.select_action(state, greedy=True))
         a_illa = illa(state, info)
         a_olla = olla(state, info)
-        ddqn_a.append(int(a_ddqn))
+        ddqn_a.append(a_ddqn)
         illa_a.append(int(a_illa))
         olla_a.append(int(a_olla))
-        state, _, term, trunc, info = env.step(int(a_ddqn))
+        state, _, term, trunc, info = env.step(a_ddqn)
         done = term or trunc
 
     ddqn_a = np.asarray(ddqn_a)
-    replay = np.asarray(replay)
     illa_a = np.asarray(illa_a)
     olla_a = np.asarray(olla_a)
+    # Recompute greedy on the stored states (not a second call on the live state).
+    replay = np.asarray(
+        [int(agent.select_action(s, greedy=True)) for s in states]
+    )
     n_fail = int(np.sum(ddqn_a != replay))
     n = len(ddqn_a)
     lo = env.mcs_min
@@ -110,14 +125,14 @@ def main():
         agree = float(np.mean(other == ddqn_a))
         ax.set_title(f"DDQN vs {name}  agree={agree:.0%}")
         ax.grid(True, alpha=0.3)
-    fig.suptitle(f"Same-state MCS — seed {args.seed}", fontsize=11)
+    fig.suptitle(f"Same-state MCS — seed {eval_seed}", fontsize=11)
     fig.tight_layout()
-    scatter_path = out_dir / f"obs_ddqn_mcs_scatter_seed{args.seed}.png"
+    scatter_path = out_dir / f"obs_ddqn_mcs_scatter_seed{eval_seed}.png"
     fig.savefig(scatter_path, dpi=150)
     plt.close(fig)
 
     md = [
-        f"# DDQN greedy replay (eval seed={args.seed})",
+        f"# DDQN greedy replay (eval seed={eval_seed})",
         "",
         f"- TBs: {n}",
         f"- greedy replay mismatches: **{n_fail}** / {n}",
@@ -127,7 +142,7 @@ def main():
         f"- scatter: `{scatter_path.name}`",
         "",
     ]
-    md_path = out_dir / f"obs_table_ddqn_greedy_seed{args.seed}.md"
+    md_path = out_dir / f"obs_table_ddqn_greedy_seed{eval_seed}.md"
     md_path.write_text("\n".join(md), encoding="utf-8")
     print(f"greedy mismatches: {n_fail}/{n}")
     print(f"Wrote {scatter_path}")

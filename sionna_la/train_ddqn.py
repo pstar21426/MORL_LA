@@ -116,6 +116,28 @@ def aggregate_metrics(rows):
     return out
 
 
+def held_out_eval_seeds(train_seed, episodes, requested):
+    """Training rollouts use env seeds [train_seed, train_seed + episodes)."""
+    used = set(range(int(train_seed), int(train_seed) + int(episodes)))
+    step = max(int(episodes), 1)
+    out = []
+    for s in requested:
+        s = int(s)
+        while s in used:
+            s += step
+        used.add(s)
+        out.append(s)
+    return out
+
+
+def resolve_held_out_eval_seed(cfg, requested):
+    train_seed = int(cfg.get("seed", 0))
+    episodes = int((cfg.get("train") or {}).get("episodes", 1000))
+    requested = int(requested)
+    resolved = held_out_eval_seeds(train_seed, episodes, [requested])[0]
+    return resolved, train_seed, episodes
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -255,9 +277,15 @@ def main():
     print(f"Saved checkpoint -> {ckpt_path}")
 
     if args.eval_seeds is not None:
-        eval_seeds = [int(s) for s in args.eval_seeds]
+        requested_eval = [int(s) for s in args.eval_seeds]
     else:
-        eval_seeds = [int(s) for s in train_cfg.get("eval_seeds", list(range(10)))]
+        requested_eval = [int(s) for s in train_cfg.get("eval_seeds", list(range(10)))]
+    eval_seeds = held_out_eval_seeds(seed, episodes, requested_eval)
+    if eval_seeds != requested_eval:
+        print(
+            f"eval seeds {requested_eval} overlap training "
+            f"[{seed}, {seed + episodes}); using {eval_seeds}"
+        )
     print(f"\n=== Eval ({len(eval_seeds)} seeds: {eval_seeds}) ===")
 
     illa_pol = make_baseline_policy("illa", env, bler_target=bler_target)

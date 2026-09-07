@@ -51,11 +51,12 @@ def add_cqi_noise(
     sinr_max_db=None,
 
 ):
-    # delay_slots=None -> pick fixed delay in {1,2,3,4} once per episode
-    rng = np.random.default_rng(seed)
+    # delay_slots=None -> pick fixed delay in {1,2,3,4} once per episode.
+    ss = np.random.SeedSequence() if seed is None else np.random.SeedSequence(int(seed))
+    delay_rng, noise_rng = (np.random.default_rng(s) for s in ss.spawn(2))
 
     if delay_slots is None:
-        delay_slots = int(rng.integers(1, 5))  # {1,2,3,4} once
+        delay_slots = int(delay_rng.integers(1, 5))  # {1,2,3,4} once
 
     if delay_slots == 0:
         delayed = sinr_true_db
@@ -64,7 +65,7 @@ def add_cqi_noise(
         delayed[:delay_slots] = sinr_true_db[0]
         delayed[delay_slots:] = sinr_true_db[:-delay_slots]
 
-    hat = delayed + noise_std_db * rng.standard_normal(size=sinr_true_db.shape)
+    hat = delayed + noise_std_db * noise_rng.standard_normal(size=sinr_true_db.shape)
     lo = -np.inf if sinr_min_db is None else float(sinr_min_db)
     hi = np.inf if sinr_max_db is None else float(sinr_max_db)
     return np.clip(hat, lo, hi), delay_slots
