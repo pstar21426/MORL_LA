@@ -1,4 +1,4 @@
-# Slot-axis cumulative return: ILLA / OLLA / DQN
+# Slot-axis cumulative return: ILLA / OLLA / DDQN
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import numpy as np
 import torch
 from sionna.sys import PHYAbstraction
 
-from dqn import DQNAgent
+from ddqn import DDQNAgent
 from la_env import DownlinkLAEnv, seed_phy
-from train_dqn import load_config
+from train_ddqn import load_config
 
 
 def slot_cum_return(rewards, slots_per_tb, total_slots):
@@ -40,13 +40,13 @@ def load_npz_rollout(path):
     }
 
 
-def dqn_rollout(env, ckpt_path, seed, hidden=256):
+def ddqn_rollout(env, ckpt_path, seed, hidden=256):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state_dim = int(ckpt["state_dim"])
     n_actions = int(ckpt["n_actions"])
     hidden = int(ckpt.get("hidden", hidden))
 
-    agent = DQNAgent(state_dim, n_actions, hidden=hidden)
+    agent = DDQNAgent(state_dim, n_actions, hidden=hidden)
     agent.q.load_state_dict(ckpt["q"])
     agent.q.eval()
 
@@ -72,7 +72,7 @@ def plot_t_return(curves, total_slots, out_path, seed):
     styles = {
         "ILLA": dict(color="C0", lw=1.6, label="ILLA"),
         "OLLA": dict(color="C1", lw=1.6, label="OLLA"),
-        "DQN": dict(color="C2", lw=1.6, label="DQN", ls="--"),
+        "DDQN": dict(color="C2", lw=1.6, label="DDQN", ls="--"),
     }
     for name, y in curves.items():
         ax.plot(t, y, **styles[name])
@@ -103,7 +103,7 @@ def main():
     p.add_argument("--out-dir", type=Path, default=None)
     p.add_argument("--illa-npz", type=Path, default=None)
     p.add_argument("--olla-npz", type=Path, default=None)
-    p.add_argument("--dqn-ckpt", type=Path, default=None)
+    p.add_argument("--ddqn-ckpt", type=Path, default=None)
     args = p.parse_args()
 
     cfg = load_config(args.config)
@@ -115,7 +115,7 @@ def main():
     total_slots = int(cfg["num_slots"])
     illa_npz = args.illa_npz or out_dir / f"la_illa_seed{seed}.npz"
     olla_npz = args.olla_npz or out_dir / f"la_olla_seed{seed}.npz"
-    dqn_ckpt = args.dqn_ckpt or out_dir / f"dqn_seed{int(cfg.get('seed', 0))}.pt"
+    ddqn_ckpt = args.ddqn_ckpt or out_dir / f"ddqn_seed{int(cfg.get('seed', 0))}.pt"
 
     illa = load_npz_rollout(illa_npz)
     olla = load_npz_rollout(olla_npz)
@@ -123,14 +123,14 @@ def main():
     phy_abs = PHYAbstraction()
     env = DownlinkLAEnv.from_config(cfg, phy_abs=phy_abs)
 
-    if not dqn_ckpt.is_file():
-        raise FileNotFoundError(f"DQN checkpoint not found: {dqn_ckpt}")
-    dqn = dqn_rollout(env, dqn_ckpt, seed)
+    if not ddqn_ckpt.is_file():
+        raise FileNotFoundError(f"DDQN checkpoint not found: {ddqn_ckpt}")
+    ddqn = ddqn_rollout(env, ddqn_ckpt, seed)
 
     curves = {
         "ILLA": slot_cum_return(illa["reward"], illa["num_slots"], total_slots),
         "OLLA": slot_cum_return(olla["reward"], olla["num_slots"], total_slots),
-        "DQN": slot_cum_return(dqn["reward"], dqn["num_slots"], total_slots),
+        "DDQN": slot_cum_return(ddqn["reward"], ddqn["num_slots"], total_slots),
     }
 
     out_path = out_dir / f"t_return_seed{seed}.png"

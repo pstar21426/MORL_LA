@@ -1,4 +1,4 @@
-# Train / eval a simple DQN on DownlinkLAEnv; compare with ILLA / OLLA
+# Train / eval DDQN on DownlinkLAEnv; compare with ILLA / OLLA
 
 import argparse
 from pathlib import Path
@@ -8,7 +8,7 @@ import torch
 import yaml
 from sionna.sys import PHYAbstraction
 
-from dqn import DQNAgent, Transition
+from ddqn import DDQNAgent, Transition
 from la_env import DownlinkLAEnv, seed_phy
 from policies import make_baseline_policy
 
@@ -42,7 +42,7 @@ def _rollout(env, choose_action, seed, on_transition=None):
         next_state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         if on_transition is not None:
-            on_transition(state, action, reward, next_state, done)
+            on_transition(state, action, reward, next_state, terminated, truncated)
         out = info["outcome"]
         st["ret"] += reward
         st["tbs"] += 1
@@ -57,16 +57,18 @@ def _rollout(env, choose_action, seed, on_transition=None):
 
 
 def run_episode(env, agent, seed, *, train=True, greedy=False):
-    def on_transition(state, action, reward, next_state, done):
+    def on_transition(state, action, reward, next_state, terminated, truncated):
         if not train:
             return
+        # time-limit truncated is not a true terminal; still bootstrap Q
+        del truncated
         agent.push(
             Transition(
                 state=state,
                 action=action,
                 reward=float(reward),
                 next_state=next_state,
-                terminated=bool(done),
+                terminated=bool(terminated),
             )
         )
         agent.train_step()
@@ -137,7 +139,7 @@ def main():
 
     cfg = load_config(args.config)
     train_cfg = cfg.get("train") or {}
-    dqn_cfg = cfg.get("dqn") or {}
+    ddqn_cfg = cfg.get("ddqn") or {}
 
     seed = int(args.seed if args.seed is not None else cfg.get("seed", 0))
     episodes = int(
@@ -146,28 +148,28 @@ def main():
     log_every = int(
         args.log_every if args.log_every is not None else train_cfg.get("log_every", 50)
     )
-    hidden = int(args.hidden if args.hidden is not None else dqn_cfg.get("hidden", 256))
+    hidden = int(args.hidden if args.hidden is not None else ddqn_cfg.get("hidden", 256))
     buffer_size = int(
         args.buffer_size
         if args.buffer_size is not None
-        else dqn_cfg.get("buffer_size", 100_000)
+        else ddqn_cfg.get("buffer_size", 100_000)
     )
     batch_size = int(
-        args.batch_size if args.batch_size is not None else dqn_cfg.get("batch_size", 64)
+        args.batch_size if args.batch_size is not None else ddqn_cfg.get("batch_size", 64)
     )
-    gamma = float(args.gamma if args.gamma is not None else dqn_cfg.get("gamma", 0.99))
-    lr = float(args.lr if args.lr is not None else dqn_cfg.get("lr", 1e-3))
+    gamma = float(args.gamma if args.gamma is not None else ddqn_cfg.get("gamma", 0.99))
+    lr = float(args.lr if args.lr is not None else ddqn_cfg.get("lr", 1e-3))
     epsilon_start = float(
         args.epsilon_start
         if args.epsilon_start is not None
-        else dqn_cfg.get("epsilon_start", 1.0)
+        else ddqn_cfg.get("epsilon_start", 1.0)
     )
     epsilon_end = float(
         args.epsilon_end
         if args.epsilon_end is not None
-        else dqn_cfg.get("epsilon_end", 0.01)
+        else ddqn_cfg.get("epsilon_end", 0.01)
     )
-    decay_cfg = dqn_cfg.get("epsilon_decay_steps")
+    decay_cfg = ddqn_cfg.get("epsilon_decay_steps")
     decay_steps = int(decay_cfg) if decay_cfg is not None else max(episodes * 100, 5_000)
 
     np.random.seed(seed)
@@ -185,7 +187,7 @@ def main():
     state_dim = int(np.prod(env.state_space.shape))
     n_actions = env.action_space.n
 
-    agent = DQNAgent(
+    agent = DDQNAgent(
         state_dim,
         n_actions,
         hidden=hidden,
@@ -193,14 +195,14 @@ def main():
         lr=lr,
         buffer_size=buffer_size,
         batch_size=batch_size,
-        target_sync=int(dqn_cfg.get("target_sync", 200)),
+        target_sync=int(ddqn_cfg.get("target_sync", 200)),
         epsilon_start=epsilon_start,
         epsilon_end=epsilon_end,
         epsilon_decay_steps=decay_steps,
     )
 
     print(
-        f"=== DQN train ({episodes} eps) state={state_dim} "
+        f"=== DDQN train ({episodes} eps) state={state_dim} "
         f"actions={n_actions} hidden={hidden} "
         f"buffer={buffer_size} eps_end={epsilon_end} ==="
     )
@@ -211,6 +213,8 @@ def main():
         "tbs": [],
         "first_tx_bler": [],
         "epsilon": [],
+        "mean_mcs": [],
+        "drops": [],
     }
 
     for ep in range(episodes):
@@ -221,19 +225,22 @@ def main():
         train_log["tbs"].append(m["tbs"])
         train_log["first_tx_bler"].append(m["first_tx_bler"])
         train_log["epsilon"].append(agent.epsilon)
+        train_log["mean_mcs"].append(m["mean_mcs"])
+        train_log["drops"].append(m["drops"])
 
         if (ep + 1) % log_every == 0 or ep == 0:
             print(
                 f"  ep {ep + 1:4d} | return={m['return']:.1f} | "
                 f"throughput={m['throughput']:.4f} | eps={agent.epsilon:.3f} | "
-                f"TBs={m['tbs']} | 1st-tx BLER={m['first_tx_bler']:.3f}"
+                f"TBs={m['tbs']} | 1st-tx BLER={m['first_tx_bler']:.3f} | "
+                f"MCS={m['mean_mcs']:.1f} | drops={m['drops']}"
             )
 
-    log_path = out_dir / f"dqn_train_log_seed{seed}.npz"
+    log_path = out_dir / f"ddqn_train_log_seed{seed}.npz"
     np.savez_compressed(log_path, **{k: np.asarray(v) for k, v in train_log.items()})
     print(f"Saved training log -> {log_path}")
 
-    ckpt_path = out_dir / f"dqn_seed{seed}.pt"
+    ckpt_path = out_dir / f"ddqn_seed{seed}.pt"
     torch.save(
         {
             "q": agent.q.state_dict(),
@@ -258,36 +265,36 @@ def main():
         "olla", env, bler_target=bler_target, olla_step_up_db=olla_step_up_db
     )
 
-    dqn_rows, illa_rows, olla_rows = [], [], []
+    ddqn_rows, illa_rows, olla_rows = [], [], []
     for eval_seed in eval_seeds:
         seed_phy(eval_seed)
-        dqn_m = run_episode(env, agent, seed=eval_seed, train=False, greedy=True)
+        ddqn_m = run_episode(env, agent, seed=eval_seed, train=False, greedy=True)
         seed_phy(eval_seed)
         illa_m = rollout_rule(env, illa_pol, eval_seed)
         seed_phy(eval_seed)
         olla_m = rollout_rule(env, olla_pol, eval_seed)
-        dqn_rows.append(dqn_m)
+        ddqn_rows.append(ddqn_m)
         illa_rows.append(illa_m)
         olla_rows.append(olla_m)
         print(f"--- seed {eval_seed} ---")
-        print_row("DQN", dqn_m, bler_target)
+        print_row("DDQN", ddqn_m, bler_target)
         print_row("ILLA", illa_m, bler_target)
         print_row("OLLA", olla_m, bler_target)
 
     print("\n=== Eval mean ± std ---")
-    dqn_agg = aggregate_metrics(dqn_rows)
+    ddqn_agg = aggregate_metrics(ddqn_rows)
     illa_agg = aggregate_metrics(illa_rows)
     olla_agg = aggregate_metrics(olla_rows)
-    print_mean_row("DQN", dqn_agg, bler_target)
+    print_mean_row("DDQN", ddqn_agg, bler_target)
     print_mean_row("ILLA", illa_agg, bler_target)
     print_mean_row("OLLA", olla_agg, bler_target)
 
-    eval_path = out_dir / f"dqn_eval_seeds{seed}.npz"
+    eval_path = out_dir / f"ddqn_eval_seeds{seed}.npz"
     np.savez_compressed(
         eval_path,
         eval_seeds=np.asarray(eval_seeds, dtype=np.int64),
-        dqn_return=np.asarray([r["return"] for r in dqn_rows]),
-        dqn_throughput=np.asarray([r["throughput"] for r in dqn_rows]),
+        ddqn_return=np.asarray([r["return"] for r in ddqn_rows]),
+        ddqn_throughput=np.asarray([r["throughput"] for r in ddqn_rows]),
         illa_return=np.asarray([r["return"] for r in illa_rows]),
         illa_throughput=np.asarray([r["throughput"] for r in illa_rows]),
         olla_return=np.asarray([r["return"] for r in olla_rows]),
@@ -299,6 +306,35 @@ def main():
         epsilon_end=epsilon_end,
     )
     print(f"Saved eval summary -> {eval_path}")
+
+    md_path = out_dir / f"ddqn_eval_table_seed{seed}.md"
+    lines = [
+        f"# DDQN eval vs ILLA / OLLA (train seed={seed}, {episodes} ep)",
+        "",
+        "| seed | DDQN ret | ILLA ret | OLLA ret | DDQN BLER | ILLA BLER | OLLA BLER | DDQN MCS | ILLA MCS | OLLA MCS | DDQN drops | ILLA drops | OLLA drops |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for i, s in enumerate(eval_seeds):
+        d, a, o = ddqn_rows[i], illa_rows[i], olla_rows[i]
+        lines.append(
+            f"| {s} | {d['return']:.1f} | {a['return']:.1f} | {o['return']:.1f} | "
+            f"{d['first_tx_bler']:.3f} | {a['first_tx_bler']:.3f} | {o['first_tx_bler']:.3f} | "
+            f"{d['mean_mcs']:.1f} | {a['mean_mcs']:.1f} | {o['mean_mcs']:.1f} | "
+            f"{d['drops']} | {a['drops']} | {o['drops']} |"
+        )
+    lines += [
+        "",
+        f"**mean±std return** DDQN {ddqn_agg['return_mean']:.1f}±{ddqn_agg['return_std']:.1f} · "
+        f"ILLA {illa_agg['return_mean']:.1f}±{illa_agg['return_std']:.1f} · "
+        f"OLLA {olla_agg['return_mean']:.1f}±{olla_agg['return_std']:.1f}",
+        "",
+        f"**mean 1st-tx BLER** DDQN {ddqn_agg['first_tx_bler_mean']:.3f} · "
+        f"ILLA {illa_agg['first_tx_bler_mean']:.3f} · "
+        f"OLLA {olla_agg['first_tx_bler_mean']:.3f}",
+        "",
+    ]
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"Saved eval table -> {md_path}")
     print("Done.")
 
 

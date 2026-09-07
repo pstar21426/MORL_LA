@@ -8,7 +8,7 @@ CQI/OLLA 조회는 TBLER만 읽고 ACK 난수를 쓰지 않습니다.
 conda activate sionna_la
 cd sionna_la
 python run_la_sim.py
-python train_dqn.py --episodes 40 --seed 0
+python train_ddqn.py --episodes 40 --seed 0
 python check_obs/check_obs.py
 ```
 
@@ -18,10 +18,11 @@ python check_obs/check_obs.py
 | `channel.py` | AR(1) effective SINR + noisy/delayed CQI |
 | `harq.py` | HARQ-IR: 첫 전송은 raw SNR, 재전송은 평균 MI → SNR_eff, 같은 Qm·원래 TBS |
 | `policies.py` | ILLA (CQI→MCS) / OLLA (CQI→SNR+offset→MCS) / ε-greedy |
+| `ddqn.py` | Double DQN agent (online argmax, target eval) |
 | `run_la_sim.py` | ILLA/OLLA 롤아웃 → plot + npz |
-| `train_dqn.py` | 간단 DQN 학습 + ILLA/OLLA 비교 eval |
-| `plot_t_return.py` | slot vs cum return (ILLA/OLLA/DQN, 에피소드 1판) |
-| `plot_dqn_train.py` | DQN 학습 곡선 (episode vs return) |
+| `train_ddqn.py` | DDQN 학습 + ILLA/OLLA 비교 eval |
+| `plot_t_return.py` | slot vs cum return (ILLA/OLLA/DDQN, 에피소드 1판) |
+| `plot_ddqn_train.py` | DDQN 학습 곡선 (episode vs return) |
 | `check_obs/check_obs.py` | A: CSI overlay / C·D: state tables (`ack_delay=0`) |
 | `configs/downlink_la.yaml` | 파라미터 |
 

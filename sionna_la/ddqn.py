@@ -1,4 +1,4 @@
-# Minimal DQN for DownlinkLAEnv (decision-step, state-only policy)
+# Double DQN for DownlinkLAEnv (decision-step, state-only policy)
 
 from collections import deque
 from dataclasses import dataclass
@@ -57,7 +57,7 @@ class ReplayBuffer:
         return states, actions, rewards, next_states, dones
 
 
-class DQNAgent:
+class DDQNAgent:
     def __init__(
         self,
         state_dim: int,
@@ -126,7 +126,9 @@ class DQNAgent:
 
         q_sa = self.q(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
-            next_q = self.q_target(next_states_t).max(dim=1).values
+            # Double DQN: online net selects action, target net evaluates it
+            next_act = self.q(next_states_t).argmax(dim=1)
+            next_q = self.q_target(next_states_t).gather(1, next_act.unsqueeze(1)).squeeze(1)
             target = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
         loss = nn.functional.mse_loss(q_sa, target)

@@ -61,6 +61,7 @@ def mcs_qm_rate(mcs_index, mcs_min, mcs_max, mcs_table_index=1):
 def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1):
     # rate_eff: coderate / 재전송 횟수
     # qm: 초전송의 Qm
+    # 그냥 mi를 더하면 금방 상한을 쳐서 재전송 효율이 너무 좋아져 에이전트가 과도한 재전송을 하게 됨
     
     cands = [ # cands: Qm이 초전송과 같은 MCS만 고름
         (m, r)
@@ -74,6 +75,7 @@ def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1):
     if below:
         return int(max(below, key=lambda x: x[1])[0])
     # 그런 MCS가 없으면 그 Qm에서 가장 낮은 rate의 MCS 반환
+    # 여기가 좀 휴리스틱한 부분
     return int(min(cands, key=lambda x: x[1])[0])
 
 

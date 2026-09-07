@@ -1,7 +1,3 @@
-# DQN training curve: episode vs return / throughput
-
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
@@ -23,7 +19,7 @@ def rolling_mean(x, window):
     return np.convolve(x, kernel, mode="valid")
 
 
-def plot_dqn_train(log, out_path, seed, roll_window=25):
+def plot_ddqn_train(log, out_path, seed, roll_window=25):
     ep = log["episode"]
     ret = log["return"]
     tp = log["throughput"]
@@ -44,10 +40,10 @@ def plot_dqn_train(log, out_path, seed, roll_window=25):
             label=f"{roll_window}-ep roll mean",
         )
     axs[0].set_ylabel("episode return")
-    axs[0].set_ylim(bottom=0)
+    axs[0].set_ylim(bottom=min(0.0, float(np.min(ret)) * 1.05 if len(ret) else 0.0))
     axs[0].grid(True, alpha=0.3)
     axs[0].legend(loc="best", fontsize=8)
-    axs[0].set_title(f"DQN training (seed={seed})")
+    axs[0].set_title(f"DDQN training (seed={seed})")
 
     # --- throughput ---
     axs[1].plot(ep, tp, color="C0", alpha=0.35, lw=0.8, label="throughput")
@@ -99,7 +95,7 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log-npz", type=Path, default=None)
     p.add_argument("--out-dir", type=Path, default=None)
-    p.add_argument("--roll-window", type=int, default=25)
+    p.add_argument("--roll-window", type=int, default=8)
     args = p.parse_args()
 
     cfg = load_config(args.config)
@@ -108,16 +104,16 @@ def main():
     if not out_dir.is_absolute():
         out_dir = Path(__file__).resolve().parent / out_dir
 
-    log_path = args.log_npz or out_dir / f"dqn_train_log_seed{seed}.npz"
+    log_path = args.log_npz or out_dir / f"ddqn_train_log_seed{seed}.npz"
     if not log_path.is_file():
         raise FileNotFoundError(
             f"Training log not found: {log_path}\n"
-            "Run train_dqn.py first, e.g. python train_dqn.py --episodes 1000"
+            "Run train_ddqn.py first, e.g. python train_ddqn.py --episodes 1000"
         )
 
     log = {k: np.asarray(v) for k, v in np.load(log_path).items()}
-    out_path = out_dir / f"dqn_train_curve_seed{seed}.png"
-    plot_dqn_train(log, out_path, seed, roll_window=args.roll_window)
+    out_path = out_dir / f"ddqn_train_curve_seed{seed}.png"
+    plot_ddqn_train(log, out_path, seed, roll_window=args.roll_window)
 
     print(f"Loaded {log_path}")
     print(f"  episodes: {len(log['episode'])}")

@@ -343,6 +343,7 @@ class DownlinkLAEnv(gym.Env):
 
             if ack == 1:
                 reward = qm * coderate / len(harq_seq) # 성공 시 보상 qm * coderate / 사용 슬롯 수
+                # max throughput을 목적으로 그냥 qm * coderate을 사용하려 했는데, 그러면 에이전트가 과도한 재전송을 하게 됨
                 self.harq.reset()
                 break
 
