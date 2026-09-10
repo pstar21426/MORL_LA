@@ -1,8 +1,17 @@
 # ILLA / OLLA / epsilon-greedy baselines (discrete CQI only)
+# + delay-free oracles: true SINR → CQI→MCS, or Sionna InnerLoopLinkAdaptation
 
 import numpy as np
+import torch
+from sionna.phy.utils import db_to_lin
+from sionna.sys import InnerLoopLinkAdaptation
 
-from cqi import build_cqi_to_mcs, calibrate_cqi_to_sinr_db, mcs_from_sinr_db
+from cqi import (
+    build_cqi_to_mcs,
+    calibrate_cqi_to_sinr_db,
+    mcs_from_sinr_db,
+    report_cqi,
+)
 
 
 def _to_action(mcs, info):
@@ -130,6 +139,99 @@ class OllaPolicy:
         return _to_action(mcs, info)
 
 
+class IdealIllaCqiPolicy:
+    # delay 없는 true SINR → CQI 양자화 → ILLA와 같은 CQI→MCS
+    name = "illa_ideal_cqi"
+
+    def __init__(
+        self,
+        phy_abs,
+        num_allocated_re,
+        mcs_min,
+        mcs_max,
+        mcs_table_index=1,
+        mcs_category=1,
+        bler_target=0.1,
+    ):
+        self.phy_abs = phy_abs
+        self.num_allocated_re = num_allocated_re
+        self.mcs_min = int(mcs_min)
+        self.mcs_max = int(mcs_max)
+        self.mcs_table_index = int(mcs_table_index)
+        self.mcs_category = int(mcs_category)
+        self.bler_target = float(bler_target)
+        self._cqi_to_mcs = build_cqi_to_mcs(
+            self.mcs_min,
+            self.mcs_max,
+            mcs_table_index=self.mcs_table_index,
+            mcs_category=self.mcs_category,
+        )
+
+    def reset(self):
+        pass
+
+    def __call__(self, state, info):
+        del state
+        sinr_lin = db_to_lin(
+            torch.tensor([float(info["sinr_true_db"])], dtype=torch.float32)
+        )
+        cqi = report_cqi(
+            self.phy_abs,
+            sinr_lin,
+            self.num_allocated_re,
+            self._cqi_to_mcs,
+            mcs_table_index=self.mcs_table_index,
+            mcs_category=self.mcs_category,
+            bler_target=self.bler_target,
+        )
+        mcs = _mcs_from_cqi(cqi, self._cqi_to_mcs)
+        return _to_action(mcs, info)
+
+
+class IdealIllaSionnaPolicy:
+    # delay 없는 연속 SINR → Sionna InnerLoopLinkAdaptation
+    name = "illa_ideal_sinr"
+
+    def __init__(
+        self,
+        phy_abs,
+        num_allocated_re,
+        mcs_min,
+        mcs_max,
+        mcs_table_index=1,
+        mcs_category=1,
+        bler_target=0.1,
+    ):
+        if torch.is_tensor(num_allocated_re):
+            self.num_allocated_re = int(num_allocated_re.reshape(-1)[0].item())
+        else:
+            self.num_allocated_re = int(num_allocated_re)
+        self.mcs_min = int(mcs_min)
+        self.mcs_max = int(mcs_max)
+        self.mcs_table_index = int(mcs_table_index)
+        self.mcs_category = int(mcs_category)
+        self._illa = InnerLoopLinkAdaptation(
+            phy_abs, bler_target=float(bler_target), fill_mcs_value=self.mcs_min
+        )
+
+    def reset(self):
+        pass
+
+    def __call__(self, state, info):
+        del state
+        sinr_lin = db_to_lin(
+            torch.tensor([float(info["sinr_true_db"])], dtype=torch.float32)
+        )
+        n_re = torch.tensor([self.num_allocated_re], dtype=torch.int32)
+        mcs = self._illa(
+            sinr_eff=sinr_lin,
+            num_allocated_re=n_re,
+            mcs_table_index=self.mcs_table_index,
+            mcs_category=self.mcs_category,
+        )
+        return _to_action(int(mcs.reshape(-1)[0].item()), info)
+
+
 class EpsilonGreedyPolicy:
     def __init__(self, base, n_actions, epsilon=0.0, seed=None):
         self.base = base
@@ -171,4 +273,17 @@ def make_baseline_policy(name, env, bler_target=0.1, olla_step_up_db=None):
         if olla_step_up_db is not None:
             kwargs["step_up_db"] = float(olla_step_up_db)
         return OllaPolicy(**kwargs)
+    if name in ("illa_ideal_cqi", "illa_ideal_sinr"):
+        kwargs = dict(
+            phy_abs=env.phy_abs,
+            num_allocated_re=env._num_re_t,
+            mcs_min=env.mcs_min,
+            mcs_max=env.mcs_max,
+            mcs_table_index=env.mcs_table_index,
+            mcs_category=env.mcs_category,
+            bler_target=bler_target,
+        )
+        if name == "illa_ideal_cqi":
+            return IdealIllaCqiPolicy(**kwargs)
+        return IdealIllaSionnaPolicy(**kwargs)
     raise ValueError(f"unknown baseline: {name}")
