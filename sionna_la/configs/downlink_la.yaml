@@ -10,7 +10,7 @@ num_allocated_re: 300
 # clip 범위는 PHYAbstraction BLER 보간 그리드. AR(1)은 정상상태 분산에서 시작
 sinr_mean_db: 10.0
 sinr_ar_rho: 0.95
-sinr_innov_std_db: 2.5   # 혁신 항; 정상상태 std = innov / sqrt(1-rho^2)
+sinr_innov_std_db: 2.5   # innovative term; 정상상태 std = innov / sqrt(1-rho^2)
 sinr_min_db: -5.0
 sinr_max_db: 30.0
 # null이면 sinr_mean_db 고정. 범위 주면 에피소드 중 평균 SINR이 가끔 바뀜
