@@ -12,7 +12,14 @@ from sionna.sys import PHYAbstraction
 
 from la_env import DownlinkLAEnv, seed_phy
 from policies import make_baseline_policy
-from run_la_sim import _flush_xlim, _slot_cum_return, rollout, summarize
+from run_la_sim import (
+    _flush_xlim,
+    _rolling,
+    _slot_cum_return,
+    _slot_hold,
+    rollout,
+    summarize,
+)
 
 _LABELS = {
     "illa": "ILLA",
@@ -32,17 +39,35 @@ def load_npz_rollout(path):
     return {k: d[k] for k in d.files}
 
 
-def plot_cum_reward(results, num_slots, out_path):
-    fig, ax = plt.subplots(figsize=(9, 3.5))
+def plot_ideal_illa(results, num_slots, out_path, mcs_window=50):
+    fig, axs = plt.subplots(2, 1, figsize=(9, 6.5), sharex=True)
     slots = np.arange(num_slots)
     x_max = num_slots - 1
-    for name, res in results.items():
+
+    for i, (name, res) in enumerate(results.items()):
+        label = _LABELS.get(name, name.upper())
+        mcs_slot = _slot_hold(res["mcs_used"], res["num_slots"], num_slots)
+        axs[0].plot(
+            slots,
+            _rolling(mcs_slot, mcs_window),
+            color=f"C{i}",
+            lw=1.6,
+            label=f"{label} {mcs_window}-slot mean",
+        )
+    axs[0].set_ylabel("MCS")
+    axs[0].legend(loc="best", fontsize=8)
+    axs[0].grid(True, alpha=0.3)
+    _flush_xlim(axs[0], x_max)
+
+    for i, (name, res) in enumerate(results.items()):
         y = _slot_cum_return(res["reward"], res["num_slots"], num_slots)
-        ax.plot(slots, y, label=_LABELS.get(name, name.upper()))
-    ax.set_ylabel("cum reward")
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
-    _flush_xlim(ax, x_max)
+        axs[1].plot(slots, y, color=f"C{i}", label=_LABELS.get(name, name.upper()))
+    axs[1].set_ylabel("cum reward")
+    axs[1].set_xlabel("slot")
+    axs[1].legend(loc="best", fontsize=8)
+    axs[1].grid(True, alpha=0.3)
+    _flush_xlim(axs[1], x_max)
+
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
@@ -75,16 +100,16 @@ def main():
     env = DownlinkLAEnv.from_config(cfg, phy_abs=phy_abs)
 
     results = {}
-    for name in ("illa", "olla"):
+    for name in ("illa", "olla", "illa_ideal_cqi", "illa_ideal_sinr"):
         npz_path = out_dir / f"la_{name}_seed{seed}.npz"
-        if not npz_path.is_file():
+        if npz_path.is_file():
+            results[name] = load_npz_rollout(npz_path)
+            summarize(name, results[name], bler_target, num_slots)
+            continue
+        if name in ("illa", "olla"):
             raise FileNotFoundError(
                 f"{npz_path} 없음. 먼저 python run_la_sim.py 로 ILLA/OLLA npz를 만들 것"
             )
-        results[name] = load_npz_rollout(npz_path)
-        summarize(name, results[name], bler_target, num_slots)
-
-    for name in ("illa_ideal_cqi", "illa_ideal_sinr"):
         policy = make_baseline_policy(
             name, env, bler_target=bler_target, olla_step_up_db=olla_step_up_db
         )
@@ -93,7 +118,6 @@ def main():
         res = rollout(env, policy, seed=seed)
         summarize(name, res, bler_target, num_slots)
         results[name] = res
-        npz_path = out_dir / f"la_{name}_seed{seed}.npz"
         np.savez_compressed(
             npz_path,
             **res,
@@ -104,7 +128,7 @@ def main():
         print(f"Saved {len(res['action'])} TB transitions -> {npz_path}")
 
     path = out_dir / f"la_ideal_illa_seed{seed}.png"
-    plot_cum_reward(results, num_slots, path)
+    plot_ideal_illa(results, num_slots, path)
     print(f"Saved plot -> {path}")
     print("Done.")
 
