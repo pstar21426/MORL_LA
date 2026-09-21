@@ -1,8 +1,11 @@
-env/la_env.py                       simple LA environment
-utils/dp.py                         DP greedy
-data_collection/collect.py          creating offline NPZ
-algorithms/my_MOPO.py               MOPO train/evaluation
-experiments/run_appendix_mopo.py    grid/lambda sweep/table
-scripts/plot_rollout_scatter.py     creating scatter plot
-datasets/                           input NPZ
-results/                            output JSON/Table/csv/...
+# MORL_LA
+
+세 작업 트리를 나눠 두었습니다. **시뮬을 바꿀 때는 `sionna_la`를 건드리지 말고 `bandit_la`에서만 수정합니다.**
+
+| 폴더 | 내용 |
+|------|------|
+| `toy_mdp/` | Appendix toy LA + MOPO (기존 루트 코드) |
+| `sionna_la/` | Sionna 5G DL LA 시뮬. 그대로 보존 |
+| `bandit_la/` | `sionna_la` 코어 복사본. OLLA vs 밴딧(LTS/UCB) 실험용 |
+
+논문 PDF는 루트에 그대로 있습니다.
