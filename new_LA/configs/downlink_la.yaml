@@ -10,7 +10,7 @@ num_allocated_re: 300
 # clip 범위는 PHYAbstraction BLER 보간 그리드. AR(1)은 정상상태 분산에서 시작
 sinr_mean_db: 10.0
 sinr_ar_rho: 0.95
-sinr_innov_std_db: 2.5   # innovative term; 정상상태 std = innov / sqrt(1-rho^2)
+sinr_innov_std_db: 2.5   # 정상상태 std = innov / sqrt(1-rho^2) ≈ 8 dB
 sinr_min_db: -5.0
 sinr_max_db: 30.0
 # null이면 sinr_mean_db 고정. 범위 주면 에피소드 중 평균 SINR이 가끔 바뀜
@@ -20,7 +20,7 @@ sinr_mean_change_prob: 0.0
 # CQI 양자화 전 CSI 오차 (진짜 SINR에 delay + 잡음)
 cqi_noise_std_db: 1.5
 # null이면 에피소드마다 delay를 1~4 사이 정수 하나 뽑음. 정수면 고정 delay
-cqi_delay_slots: null
+cqi_delay_slots: 3
 # 매 슬롯 CQI = TBLER(MCS(q), SINR_hat) ≤ target 인 최대 q
 cqi_bler_target: 0.1
 # TB 끝난 뒤 이만큼 슬롯 지나야 초전송 ACK가 관측/히스토리에 들어감
@@ -29,11 +29,21 @@ ack_delay_slots: 0
 olla_step_up_db: 0.1
 
 # HARQ-IR: 초전송은 raw SNR, 재전송은 평균 MI → SNR_eff, 같은 Qm/원래 TBS
-harq_max_retx: 2
-drop_penalty: 6.0         # TB drop 보상 (음수)
+# harq_max_retx는 재전송 횟수. 초기 전송은 포함하지 않음.
+# harq_retx_gap_slots: 재전송 앞에 비우는 슬롯. 그 슬롯은 도착만 한다.
+harq_max_retx: 3
+harq_retx_gap_slots: 3
+drop_penalty: 3.0         # 포기한 비트/RE 에 곱함. 오버플로는 1배.
 
-# 결정 시점 state: [cqi_n, past_cqi×L, m×L, b×L]
+# 결정 시점 state: [cqi_n, past_cqi×L, m×L, b×L, queue/capacity]
 state_num_lags: 3
+
+# 비트 버퍼. RB 수는 고정. 슬롯마다 아래 범위의 비트가 균등 도착한다.
+# 상태 큐 = 비트/용량. ACK 보상 = 전달 비트/RE. 오버플로 비용 = penalty × (넘친 비트/RE).
+arrival_bits_min: 400
+arrival_bits_max: 800
+queue_capacity: 15000
+overflow_penalty: 1.0
 
 # run_la_sim 평가 시드. null이면 [seed]만
 eval_seeds: [0, 1, 2, 3, 4]

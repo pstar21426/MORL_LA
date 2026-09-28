@@ -1,5 +1,9 @@
-# Gym env: 1 step = 1 TB (초기 전송 + HARQ 재전송).
-# State: [cqi_n, past_cqi×L, past_m×L, past_b×L] (unseen = -1). True SINR는 state에 포함되지 않음.
+# Gym env: 1 step = 1 TB (초기 전송 + HARQ 재전송). 버퍼가 비면 1슬롯 idle.
+# State: [cqi_n, past_cqi×L, past_m×L, past_b×L, queue/capacity] (unseen = -1).
+# 버퍼는 대기 비트. RB 수는 고정. MCS는 전송 시작 슬롯의 CQI로 고른다.
+# 상태의 큐는 비트/용량. 보상은 비트/RE. ACK·HARQ 포기 때만 TBS만큼 뺀다.
+# 슬롯 순서: 도착을 관측에 넣은 뒤 결정하고 전송한다.
+# 재전송은 gap 슬롯을 비운 뒤에 한다. gap 동안에는 비트만 도착한다.
 # HARQ-IR: 초기 전송은 SNR 사용; 재전송 시 SNR_eff = I^{-1}(mean I), 같은 Qm, R/n, 초기 전송 TBS를 사용.
 
 from collections import deque
@@ -86,8 +90,13 @@ class DownlinkLAEnv(gym.Env):
         cqi_bler_target=0.1,
         ack_delay_slots=0,
         harq_max_retx=2,
-        drop_penalty=6.0,
+        drop_penalty=3.0,
+        harq_retx_gap_slots=3,
         state_num_lags=3,
+        arrival_bits_min=400,
+        arrival_bits_max=800,
+        queue_capacity=15000,
+        overflow_penalty=1.0,
         phy_abs=None,
     ):
         super().__init__()
@@ -111,6 +120,11 @@ class DownlinkLAEnv(gym.Env):
         self.cqi_bler_target = float(cqi_bler_target)
         self.ack_delay_slots = max(0, int(ack_delay_slots))
         self.drop_penalty = drop_penalty
+        self.harq_retx_gap_slots = max(0, int(harq_retx_gap_slots))
+        self.arrival_bits_min = int(arrival_bits_min)
+        self.arrival_bits_max = max(self.arrival_bits_min, int(arrival_bits_max))
+        self.queue_capacity = max(1, int(queue_capacity))
+        self.overflow_penalty = float(overflow_penalty)
 
         self.phy_abs = phy_abs if phy_abs is not None else PHYAbstraction()
         self.harq = HarqProcess(max_retx=harq_max_retx)
@@ -127,9 +141,11 @@ class DownlinkLAEnv(gym.Env):
         self.action_space = spaces.Discrete(self._mcs_span + 1)
 
         n = self.hist.num_lags
-        state_dim = 1 + 3 * n # 10차원
+        state_dim = 2 + 3 * n  # CQI + lags + queue
+        low = np.full(state_dim, _UNSEEN, dtype=np.float32)
+        low[-1] = 0.0
         self.state_space = spaces.Box(
-            low=np.full(state_dim, _UNSEEN, dtype=np.float32),
+            low=low,
             high=np.ones(state_dim, dtype=np.float32),
             dtype=np.float32,
         )
@@ -145,6 +161,7 @@ class DownlinkLAEnv(gym.Env):
         self._pending_harq = [-1]
         self._fb_queue = deque()
         self._ack_seed = 2
+        self._q = 0
     
     # --------------------------------------------------------------
     # Sionna TBLER 계산, 0~2 인덱스가 테이블에 없어서 mcs_min으로 보정
@@ -195,8 +212,15 @@ class DownlinkLAEnv(gym.Env):
     def _state(self, cqi_index=None):
         if cqi_index is None:
             cqi_index = self._report_cqi_at(self._t)
+        q_norm = float(self._q) / float(self.queue_capacity)
         return np.array(
-            [normalize_cqi(cqi_index), *self.hist.cqi, *self.hist.mcs, *self.hist.ack],
+            [
+                normalize_cqi(cqi_index),
+                *self.hist.cqi,
+                *self.hist.mcs,
+                *self.hist.ack,
+                q_norm,
+            ],
             dtype=np.float32,
         )
 
@@ -224,6 +248,7 @@ class DownlinkLAEnv(gym.Env):
             ),
             "cqi_delay_slots": self._delay_used,
             "ack_delay_slots": self.ack_delay_slots,
+            "queue": int(self._q),
         }
         # 테스트 시에는 특정 outcome을 넣으면 해당 outcome의 info를 반환
         if outcome is not None:
@@ -267,7 +292,9 @@ class DownlinkLAEnv(gym.Env):
         self._ever_decided = False
         self._pending_harq = [-1]
         self._fb_queue.clear()
+        self._q = 0
         self._drain_feedback(0)
+        self._arrive()
         cqi_index = self._report_cqi_at(self._t)
         return self._state(cqi_index), self._info(cqi_index=cqi_index)
 
@@ -301,6 +328,19 @@ class DownlinkLAEnv(gym.Env):
         ack = 0 if _slot_uniform(self._ack_seed, self._t) < tbler else 1
         return ack, tbler, ack * self.harq.tbs, sinr_eq_db
 
+    def _se(self, bits):
+        return float(bits) / float(self.num_allocated_re)
+
+    # 슬롯마다 [min, max] 비트가 균등 도착. 넘친 비트 수를 반환한다.
+    def _arrive(self):
+        bits = int(self.np_random.integers(self.arrival_bits_min, self.arrival_bits_max + 1))
+        space = self.queue_capacity - self._q
+        if bits <= space:
+            self._q += bits
+            return 0
+        self._q = self.queue_capacity
+        return int(bits - space)
+
     def step(self, action):
         # 현재 slot이 num_slots보다 크거나 같으면 종료
         if self._t >= self.num_slots:
@@ -312,6 +352,9 @@ class DownlinkLAEnv(gym.Env):
                 True,
                 self._info(self._idle_outcome(cqi_index), cqi_index=cqi_index),
             )
+
+        if self._q <= 0:
+            return self._idle_slot()
 
         decision_slot = self._t
         decision_cqi = self._report_cqi_at(self._t)
@@ -334,11 +377,15 @@ class DownlinkLAEnv(gym.Env):
             mcs_category=self.mcs_category,
         )
         # 이따가 _phy_once() 메서드 호출하기 위한 정보 저장
+        tbs = _item_int(tbs_t)
         self.harq.start_transmission(
-            mcs_used, qm, coderate, _item_int(tbs_t), _item_int(cb_t), _item_int(ncb_t)
+            mcs_used, qm, coderate, tbs, _item_int(cb_t), _item_int(ncb_t)
         )
+        payload = min(self._q, tbs)
 
         reward = 0.0
+        n_overflow = 0
+        discard_bits = 0
         harq_seq = []
         first_ack = 0
         dropped = False
@@ -348,6 +395,7 @@ class DownlinkLAEnv(gym.Env):
         last_bits = 0
         last_sinr_eq = decision_gamma
 
+        # 이 슬롯 도착은 이미 관측에 들어 있다. 전송 후 다음 슬롯 시작에 도착을 넣는다.
         while self._t < self.num_slots:
             ack, tbler, bits, sinr_eq = self._phy_once()
             harq_seq.append(ack)
@@ -355,23 +403,51 @@ class DownlinkLAEnv(gym.Env):
             if len(harq_seq) == 1:
                 first_ack = ack
                 first_tbler = tbler
-            self._t += 1
 
+            finished = False
             if ack == 1:
-                reward = qm * coderate / len(harq_seq) # 성공 시 보상 qm * coderate / 사용 슬롯 수
-                # max throughput을 목적으로 그냥 qm * coderate을 사용하려 했는데, 그러면 에이전트가 과도한 재전송을 하게 됨
+                reward = self._se(payload)
+                self._q = max(0, self._q - payload)
+                self.harq.reset()
+                finished = True
+            else:
+                dropped = self.harq.on_nack()
+                if dropped:
+                    reward = -self.drop_penalty * self._se(payload)
+                    discard_bits = payload
+                    self._q = max(0, self._q - payload)
+                    finished = True
+
+            self._t += 1
+            if self._t < self.num_slots:
+                n_overflow += self._arrive()
+            if finished:
+                break
+            if self._t >= self.num_slots:
+                truncated_mid_tb = True
                 self.harq.reset()
                 break
-
-            dropped = self.harq.on_nack()
-            if dropped:
-                reward = -self.drop_penalty # 실패 시 보상(상수)
+            # 재전송 전에 슬롯을 비운다. 도착만 있고 전송은 없다.
+            gap_open = True
+            for _ in range(self.harq_retx_gap_slots):
+                self._t += 1
+                if self._t >= self.num_slots:
+                    gap_open = False
+                    break
+                n_overflow += self._arrive()
+            if not gap_open:
+                truncated_mid_tb = True
+                self.harq.reset()
                 break
         else:
             truncated_mid_tb = True
             self.harq.reset()
 
+        bit_reward = reward
+        reward = bit_reward - self.overflow_penalty * self._se(n_overflow)
+
         num_tx = len(harq_seq)
+        slots_used = self._t - decision_slot
         mcs_norm = (mcs_used - self.mcs_min) / self._mcs_span
         if harq_seq:
             self._fb_queue.append(
@@ -393,7 +469,7 @@ class DownlinkLAEnv(gym.Env):
             self._info(
                 self._tb_outcome(
                     first_ack=first_ack,
-                    reward=reward,
+                    reward=bit_reward,
                     mcs_used=mcs_used,
                     qm=qm,
                     coderate=coderate,
@@ -407,14 +483,40 @@ class DownlinkLAEnv(gym.Env):
                     dropped=dropped,
                     truncated_mid_tb=truncated_mid_tb,
                     num_tx=num_tx,
+                    slots_used=slots_used,
                     harq_seq=harq_seq,
                     decision_slot=decision_slot,
+                    n_overflow=n_overflow,
+                    discard_bits=discard_bits,
+                    n_re=self.num_allocated_re,
                 ),
                 cqi_index=next_cqi,
             ),
         )
 
-    def _idle_outcome(self, cqi_index):
+    def _idle_slot(self):
+        # 빈 슬롯의 도착은 이미 관측에서 실패했다. 다음 슬롯 시작에 도착을 넣는다.
+        decision_slot = self._t
+        self._t += 1
+        n_overflow = self._arrive() if self._t < self.num_slots else 0
+        self._last_decision_slot = decision_slot
+        self._ever_decided = True
+        truncated = self._t >= self.num_slots
+        self._drain_feedback(self._t)
+        cqi_index = self._report_cqi_at(self._t)
+        reward = -self.overflow_penalty * self._se(n_overflow)
+        outcome = self._idle_outcome(cqi_index, n_overflow)
+        outcome["reward"] = float(reward)
+        outcome["decision_slot"] = int(decision_slot)
+        return (
+            self._state(cqi_index),
+            float(reward),
+            False,
+            truncated,
+            self._info(outcome, cqi_index=cqi_index),
+        )
+
+    def _idle_outcome(self, cqi_index, n_overflow=0):
         gamma = self._gamma_at(self._t)
         return self._tb_outcome(
             first_ack=0,
@@ -434,6 +536,9 @@ class DownlinkLAEnv(gym.Env):
             num_tx=0,
             harq_seq=[],
             decision_slot=int(self._t),
+            n_overflow=n_overflow,
+            n_re=self.num_allocated_re,
+            idle=True,
         )
 
     @staticmethod
@@ -455,8 +560,15 @@ class DownlinkLAEnv(gym.Env):
         truncated_mid_tb,
         num_tx,
         harq_seq,
+        slots_used=None,
         decision_slot,
+        n_overflow=0,
+        discard_bits=0,
+        n_re=1,
+        idle=False,
     ):
+        lost_bits = int(n_overflow) + int(discard_bits)
+        delivered_se = float(reward) if reward > 0 else 0.0
         return {
             "ack": first_ack,
             "tb_success": int(reward > 0),
@@ -473,10 +585,16 @@ class DownlinkLAEnv(gym.Env):
             "decoded_bits": last_bits,
             "dropped": dropped,
             "truncated_mid_tb": truncated_mid_tb,
-            "num_slots": num_tx,
+            "num_slots": int(num_tx if slots_used is None else slots_used),
             "num_retx": max(num_tx - 1, 0),
             "harq_seq": list(harq_seq),
             "decision_slot": decision_slot,
+            "n_overflow": int(n_overflow),
+            "discard_bits": int(discard_bits),
+            "lost_bits": lost_bits,
+            "lost_se": float(lost_bits) / float(max(n_re, 1)),
+            "delivered_se": delivered_se,
+            "idle": bool(idle),
         }
 
     @classmethod
@@ -499,7 +617,12 @@ class DownlinkLAEnv(gym.Env):
             "cqi_bler_target",
             "harq_max_retx",
             "drop_penalty",
+            "harq_retx_gap_slots",
             "state_num_lags",
+            "arrival_bits_min",
+            "arrival_bits_max",
+            "queue_capacity",
+            "overflow_penalty",
         )
         kwargs = {k: cfg[k] for k in keys if k in cfg}
         return cls(phy_abs=phy_abs, **kwargs)

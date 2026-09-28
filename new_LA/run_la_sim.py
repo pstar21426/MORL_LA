@@ -23,7 +23,7 @@ def rollout(env, policy, seed):
 
     log = {k: [] for k in (
         "state", "action", "reward", "next_state", "done",
-        "mcs_used", "ack", "tb_success", "dropped", "truncated_mid_tb",
+        "mcs_used", "ack", "tb_success", "dropped", "n_overflow", "lost_se", "delivered_se", "truncated_mid_tb",
         "num_slots", "num_retx", "delta_tau",
         "sinr_true_db", "sinr_hat_db", "cqi_index", "cqi_norm",
         "tbler", "tbler_last", "decoded_bits",
@@ -50,6 +50,9 @@ def rollout(env, policy, seed):
         log["ack"].append(out["ack"])
         log["tb_success"].append(out["tb_success"])
         log["dropped"].append(out["dropped"])
+        log["n_overflow"].append(out["n_overflow"])
+        log["lost_se"].append(out.get("lost_se", 0.0))
+        log["delivered_se"].append(out.get("delivered_se", 0.0))
         log["truncated_mid_tb"].append(out["truncated_mid_tb"])
         log["num_slots"].append(out["num_slots"])
         log["num_retx"].append(out["num_retx"])
@@ -71,8 +74,20 @@ def rollout(env, policy, seed):
 
 
 def metrics_from_rollout(res, num_slots):
-    n = len(res["ack"])
-    finished = ~np.asarray(res["truncated_mid_tb"], dtype=bool)
+    n = int((np.asarray(res["num_slots"]) > 0).sum())
+    served = np.asarray(res["num_slots"]) > 0
+    if n == 0:
+        return {
+            "return": float(res["reward"].sum()),
+            "throughput": float(res["reward"].sum() / num_slots),
+            "tbs": 0,
+            "first_tx_bler": 0.0,
+            "tb_fail": 0.0,
+            "mean_mcs": 0.0,
+            "mean_slots_tb": 0.0,
+            "drops": float(np.asarray(res["lost_se"]).sum()) if "lost_se" in res else 0.0,
+        }
+    finished = served & ~np.asarray(res["truncated_mid_tb"], dtype=bool)
     n_fin = int(finished.sum())
     tb_fail = (
         float(1.0 - res["tb_success"][finished].mean()) if n_fin else 0.0
@@ -81,11 +96,13 @@ def metrics_from_rollout(res, num_slots):
         "return": float(res["reward"].sum()),
         "throughput": float(res["reward"].sum() / num_slots),
         "tbs": n,
-        "first_tx_bler": float(1.0 - res["ack"].mean()),
+        "first_tx_bler": float(1.0 - res["ack"][served].mean()),
         "tb_fail": tb_fail,
-        "mean_mcs": float(res["mcs_used"].mean()),
-        "mean_slots_tb": float(res["num_slots"].mean()),
-        "drops": int(res["dropped"].sum()),
+        "mean_mcs": float(res["mcs_used"][served].mean()),
+        "mean_slots_tb": float(res["num_slots"][served].mean()),
+        "drops": float(np.asarray(res["lost_se"]).sum()) if "lost_se" in res else (
+            int(res["dropped"][served].sum()) + int(np.asarray(res["n_overflow"]).sum())
+        ),
     }
 
 
@@ -100,7 +117,7 @@ def summarize(name, res, bler_target, num_slots):
         f"TB fail={m['tb_fail']:.3f} | "
         f"mean MCS={m['mean_mcs']:.1f} | "
         f"mean slots/TB={m['mean_slots_tb']:.2f} | "
-        f"drops={m['drops']}"
+        f"drops={m['drops']:.1f}"
     )
     return m
 
