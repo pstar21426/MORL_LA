@@ -86,6 +86,7 @@ class DownlinkLAEnv(gym.Env):
         sinr_mean_range_db=None,
         sinr_mean_change_prob=0.0,
         cqi_noise_std_db=1.5,
+        cqi_bias_db=0.0,
         cqi_delay_slots=None,
         cqi_bler_target=0.1,
         ack_delay_slots=0,
@@ -116,6 +117,7 @@ class DownlinkLAEnv(gym.Env):
         )
         self.sinr_mean_change_prob = sinr_mean_change_prob
         self.cqi_noise_std_db = cqi_noise_std_db
+        self.cqi_bias_db = float(cqi_bias_db)
         self.cqi_delay_slots = cqi_delay_slots
         self.cqi_bler_target = float(cqi_bler_target)
         self.ack_delay_slots = max(0, int(ack_delay_slots))
@@ -275,6 +277,7 @@ class DownlinkLAEnv(gym.Env):
         self._sinr_fb_db, self._delay_used = add_cqi_noise(
             self._sinr_true_db,
             noise_std_db=self.cqi_noise_std_db,
+            bias_db=self.cqi_bias_db,
             delay_slots=self.cqi_delay_slots,
             seed=None if seed is None else seed + 1,
             sinr_min_db=self.sinr_min_db,
@@ -612,6 +615,7 @@ class DownlinkLAEnv(gym.Env):
             "sinr_mean_range_db",
             "sinr_mean_change_prob",
             "cqi_noise_std_db",
+            "cqi_bias_db",
             "cqi_delay_slots",
             "ack_delay_slots",
             "cqi_bler_target",

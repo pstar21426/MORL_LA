@@ -45,6 +45,7 @@ def generate_sinr_db_trace(
 def add_cqi_noise(
     sinr_true_db,
     noise_std_db=1.5,
+    bias_db=0.0,
     delay_slots=None,
     seed=None,
     sinr_min_db=None,
@@ -65,7 +66,7 @@ def add_cqi_noise(
         delayed[:delay_slots] = sinr_true_db[0]
         delayed[delay_slots:] = sinr_true_db[:-delay_slots]
 
-    hat = delayed + noise_std_db * noise_rng.standard_normal(size=sinr_true_db.shape)
+    hat = delayed + float(bias_db) + noise_std_db * noise_rng.standard_normal(size=sinr_true_db.shape)
     lo = -np.inf if sinr_min_db is None else float(sinr_min_db)
     hi = np.inf if sinr_max_db is None else float(sinr_max_db)
     return np.clip(hat, lo, hi), delay_slots

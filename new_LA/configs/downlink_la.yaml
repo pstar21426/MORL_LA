@@ -17,8 +17,10 @@ sinr_max_db: 30.0
 sinr_mean_range_db: null
 sinr_mean_change_prob: 0.0
 
-# CQI 양자화 전 CSI 오차 (진짜 SINR에 delay + 잡음)
+# CQI 양자화 전 CSI 오차 (진짜 SINR에 delay + 잡음 + 편향)
+# cqi_bias_db > 0 이면 CQI용 SINR이 데이터 채널보다 낙관적이다.
 cqi_noise_std_db: 1.5
+cqi_bias_db: 3.0
 # null이면 에피소드마다 delay를 1~4 사이 정수 하나 뽑음. 정수면 고정 delay
 cqi_delay_slots: 3
 # 매 슬롯 CQI = TBLER(MCS(q), SINR_hat) ≤ target 인 최대 q
@@ -40,8 +42,8 @@ state_num_lags: 3
 
 # 비트 버퍼. RB 수는 고정. 슬롯마다 아래 범위의 비트가 균등 도착한다.
 # 상태 큐 = 비트/용량. ACK 보상 = 전달 비트/RE. 오버플로 비용 = penalty × (넘친 비트/RE).
-arrival_bits_min: 400
-arrival_bits_max: 800
+arrival_bits_min: 300
+arrival_bits_max: 500
 queue_capacity: 15000
 overflow_penalty: 1.0
 
