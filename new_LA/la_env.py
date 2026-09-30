@@ -1,11 +1,11 @@
 # Gym env: 1 step = 1 TB (초기 전송 + HARQ 재전송). 버퍼가 비면 1슬롯 idle.
 # State: [cqi_n, past_cqi×L, past_m×L, past_b×L, queue/capacity] (unseen = -1).
-# 버퍼는 대기 비트. RB 수는 고정. MCS는 action이다.
+# 버퍼는 대기 비트. RB 수는 고정. MCS는 action임.
 # 상태의 큐는 비트/용량. 보상은 비트/RE.
-# ACK·HARQ 포기 때 min(큐, 코드블록 비트)를 뺀다. 코드블록 비트는 TB CRC를 포함한다.
+# ACK·HARQ 포기 때 min(큐, 코드블록 비트)를 뺌. 코드블록 비트는 TB CRC를 포함.
 # 슬롯 순서: 도착을 큐에 넣은 뒤 관측하고 전송한다.
 # 재전송은 gap 슬롯을 비운 뒤에 한다. gap 동안에는 비트만 도착한다.
-# HARQ-IR: 초기 전송은 그 슬롯 SINR. 재전송은 SNR_eff = I^{-1}(mean I), 같은 Qm, R/n, 처음 코드블록.
+# HARQ-IR: 초기 전송은 그 슬롯 SINR. 재전송은 SNR_eff = I^{-1}(mean I), 같은 Qm, R/n
 
 from collections import deque
 
@@ -191,7 +191,7 @@ class DownlinkLAEnv(gym.Env):
             bler_target=self.cqi_bler_target,
         )
 
-    # 공개 시점이 된 초전송 ACK를 히스토리에 넣는다. 없으면 [-1].
+    # 공개 시점이 된 초전송 ACK를 히스토리에 넣음. 없으면 [-1].
     # _fb_queue: (slot, first_ack, cqi_n, mcs_norm)
     def _drain_feedback(self, now_slot):
         drained = []
@@ -308,7 +308,7 @@ class DownlinkLAEnv(gym.Env):
     def _se(self, bits):
         return float(bits) / float(self.num_allocated_re)
 
-    # 슬롯마다 [min, max] 비트가 균등 도착. 넘친 비트 수를 반환한다.
+    # 슬롯마다 [min, max] 비트가 균등 도착. 넘친 비트 수를 반환
     def _arrive(self):
         bits = int(self.np_random.integers(self.arrival_bits_min, self.arrival_bits_max + 1))
         space = self.queue_capacity - self._q
@@ -319,7 +319,7 @@ class DownlinkLAEnv(gym.Env):
         return int(bits - space)
 
     def step(self, action):
-        # 현재 slot이 num_slots보다 크거나 같으면 종료
+        # 현재 slot이 num_slots보다 크거나 같으면 종료됨
         if self._t >= self.num_slots:
             cqi_index = self._report_cqi_at(self._t)
             return (
@@ -370,7 +370,7 @@ class DownlinkLAEnv(gym.Env):
         first_tbler = 0.0
         last_sinr_eq = decision_gamma
 
-        # 이 슬롯 도착은 이미 큐에 있다. 전송 후 다음 슬롯 시작에 도착을 넣는다.
+        # 이 슬롯 도착은 이미 큐에 있음. 전송 후 다음 슬롯 시작에 도착을 넣음
         while self._t < self.num_slots:
             ack, tbler, sinr_eq = self._phy_once()
             harq_seq.append(ack)
@@ -402,7 +402,7 @@ class DownlinkLAEnv(gym.Env):
                 truncated_mid_tb = True
                 self.harq.reset()
                 break
-            # 재전송 전에 슬롯을 비운다. 도착만 있고 전송은 없다.
+            # 재전송 전에 슬롯을 비움. 도착만 있고 전송은 없음.
             gap_open = True
             for _ in range(self.harq_retx_gap_slots):
                 self._t += 1
@@ -466,7 +466,6 @@ class DownlinkLAEnv(gym.Env):
         )
 
     def _idle_slot(self):
-        # 이 슬롯 도착은 이미 큐에 있다. 슬롯을 넘긴 뒤 다음 슬롯 도착을 넣는다.
         decision_slot = self._t
         self._t += 1
         n_overflow = self._arrive() if self._t < self.num_slots else 0

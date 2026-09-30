@@ -65,8 +65,8 @@ def mcs_qm_rate(mcs_index, mcs_min, mcs_max, mcs_table_index=1, mcs_category=1):
 
 def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1, mcs_category=1):
     # rate_eff = 초전송 부호율 / 전송 횟수(초기 전송 포함).
-    # 같은 Qm에서 그 부호율 이하인 MCS 중 가장 높은 것. 없으면 그 Qm의 최저 MCS.
-    # 합친 MI를 SNR로 바꾸면 상한에 붙어 재전송이 너무 잘 된다.
+    # 같은 Qm에서 그 부호율 이하인 MCS 중 가장 높은 것, 없으면 그 Qm의 최저 MCS
+    # 합친 MI를 SNR로 바꾸면 상한에 붙어 재전송이 너무 잘 됨
     cands = [
         (m, r)
         for m, qq, r in _mcs_qm_rate_table(

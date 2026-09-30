@@ -7,7 +7,6 @@ mcs_category: 1           # 1 = downlink
 num_allocated_re: 300
 
 # effective SINR
-# clip 범위는 PHYAbstraction BLER 보간 그리드. AR(1)은 정상상태 분산에서 시작
 sinr_mean_db: 10.0
 sinr_ar_rho: 0.95
 sinr_innov_std_db: 2.5   # 정상상태 std = innov / sqrt(1-rho^2) ≈ 8 dB
@@ -18,7 +17,7 @@ sinr_mean_range_db: null
 sinr_mean_change_prob: 0.0
 
 # CQI 양자화 전 CSI 오차 (진짜 SINR에 delay + 잡음 + 편향)
-# cqi_bias_db > 0 이면 CQI용 SINR이 데이터 채널보다 낙관적이다.
+# cqi_bias_db > 0 이면 CQI용 SINR이 데이터 채널보다 낙관적
 cqi_noise_std_db: 1.5
 cqi_bias_db: 3.0
 # null이면 에피소드마다 delay를 1~4 사이 정수 하나 뽑음. 정수면 고정 delay
@@ -32,16 +31,16 @@ olla_step_up_db: 0.1
 
 # HARQ-IR: 초전송은 raw SNR, 재전송은 평균 MI → SNR_eff, 같은 Qm/원래 TBS
 # harq_max_retx는 재전송 횟수. 초기 전송은 포함하지 않음.
-# harq_retx_gap_slots: 재전송 앞에 비우는 슬롯. 그 슬롯은 도착만 한다.
+# harq_retx_gap_slots: 재전송 앞에 비우는 슬롯.
 harq_max_retx: 3
 harq_retx_gap_slots: 3
-drop_penalty: 0.0         # HARQ 포기 보상은 0. 전달되지 않은 비트는 D에 없다.
+drop_penalty: 0.0
 
 # 결정 시점 state: [cqi_n, past_cqi×L, m×L, b×L, queue/capacity]
 state_num_lags: 3
 
-# 비트 버퍼. RB 수는 고정. 슬롯마다 아래 범위의 비트가 균등 도착한다.
-# 상태 큐 = 비트/용량. ACK 보상 = 전달 비트/RE. 오버플로는 보상에서 빼지 않는다.
+# 비트 버퍼, RB 수는 고정. 슬롯마다 아래 범위의 비트가 균등 도착한다.
+# 상태 큐 = 비트/용량, ACK 보상 = 전달 비트/RE
 arrival_bits_min: 300
 arrival_bits_max: 500
 queue_capacity: 15000
