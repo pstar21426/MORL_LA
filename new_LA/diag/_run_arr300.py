@@ -89,7 +89,7 @@ def main():
                 seed201[name] = _slot_cum_return(
                     res["delivered_se"], slots_tb, env.num_slots
                 )
-                # delivered bits/RE minus tail drop and HARQ discard, unweighted.
+                # delivered bits/RE minus overflow and HARQ discard, without the drop penalty.
                 net_se = np.asarray(res["delivered_se"], dtype=np.float64) - np.asarray(
                     res["lost_se"], dtype=np.float64
                 )
@@ -117,7 +117,7 @@ def main():
     axes[0].plot(seed201["ILLA"], label="ILLA", color="C0")
     axes[0].plot(seed201["OLLA"], label="OLLA", color="C1")
     axes[0].set_ylabel("delivered bits/RE")
-    axes[0].set_title("seed 201, arrival 300-500 bits/slot")
+    axes[0].set_title("seed 201, bias +3 dB, arrival 300-500")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
@@ -138,7 +138,7 @@ def main():
     axes[2].grid(True, alpha=0.3)
     fig.tight_layout()
     OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / "illa_olla_arr300_500_seed201.png"
+    path = OUT / "illa_olla_bias3_arr300_seed201.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
     print(f"saved {path}")

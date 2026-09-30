@@ -20,22 +20,20 @@ def load_config(path):
 
 def _metrics(st, num_slots):
     n = max(st["tbs"], 1)
-    n_fin = max(st["tbs"] - st["n_trunc"], 1)
     return {
         "return": st["ret"],
         "tbs": st["tbs"],
         "first_tx_bler": 1.0 - st["n_ack"] / n,
-        "tb_fail": 1.0 - st["n_ok"] / n_fin,
         "mean_mcs": st["mcs_sum"] / n,
         "mean_slots_tb": st["n_slots"] / n,
-        "throughput": st["ret"] / max(num_slots, 1),
+        "return_per_slot": st["ret"] / max(num_slots, 1),
         "drops": st["drops"],
     }
 
 
 def _rollout(env, choose_action, seed, on_transition=None):
     state, info = env.reset(seed=seed)
-    st = dict(ret=0.0, tbs=0, n_ack=0, n_slots=0, n_ok=0, n_trunc=0, mcs_sum=0.0, drops=0)
+    st = dict(ret=0.0, tbs=0, n_ack=0, n_slots=0, mcs_sum=0.0, drops=0)
     done = False
     while not done:
         action = choose_action(state, info)
@@ -52,8 +50,6 @@ def _rollout(env, choose_action, seed, on_transition=None):
         st["tbs"] += 1
         st["n_ack"] += int(out["ack"])
         st["n_slots"] += int(out["num_slots"])
-        st["n_ok"] += int(out["tb_success"])
-        st["n_trunc"] += int(out["truncated_mid_tb"])
         st["mcs_sum"] += float(out["mcs_used"])
         state = next_state
     return _metrics(st, env.num_slots)
@@ -92,7 +88,7 @@ def rollout_rule(env, policy, seed):
 def print_row(name, m, bler_target, *, prefix=""):
     print(
         f"{prefix}[{name:>5}] return={m['return']:7.1f} | "
-        f"throughput={m['throughput']:.4f} | "
+        f"return/slot={m['return_per_slot']:.4f} | "
         f"TBs={m['tbs']:3d} | "
         f"1st-tx BLER={m['first_tx_bler']:.3f} (tgt {bler_target}) | "
         f"slots/TB={m['mean_slots_tb']:.2f} | drops={m['drops']:.1f}"
@@ -102,7 +98,7 @@ def print_row(name, m, bler_target, *, prefix=""):
 def print_mean_row(name, metrics, bler_target):
     print(
         f"[{name:>5}] return={metrics['return_mean']:7.1f} ± {metrics['return_std']:.1f} | "
-        f"throughput={metrics['throughput_mean']:.4f} ± {metrics['throughput_std']:.4f} | "
+        f"return/slot={metrics['return_per_slot_mean']:.4f} ± {metrics['return_per_slot_std']:.4f} | "
         f"TBs={metrics['tbs_mean']:.0f} | "
         f"1st-tx BLER={metrics['first_tx_bler_mean']:.3f} (tgt {bler_target}) | "
         f"slots/TB={metrics['mean_slots_tb_mean']:.2f} | drops={metrics['drops_mean']:.1f}"
@@ -110,7 +106,7 @@ def print_mean_row(name, metrics, bler_target):
 
 
 def aggregate_metrics(rows):
-    keys = ["return", "throughput", "tbs", "first_tx_bler", "mean_slots_tb", "drops"]
+    keys = ["return", "return_per_slot", "tbs", "first_tx_bler", "mean_slots_tb", "drops"]
     out = {}
     for k in keys:
         vals = np.asarray([r[k] for r in rows], dtype=np.float64)
@@ -234,7 +230,7 @@ def main():
     train_log = {
         "episode": [],
         "return": [],
-        "throughput": [],
+        "return_per_slot": [],
         "tbs": [],
         "first_tx_bler": [],
         "epsilon": [],
@@ -246,7 +242,7 @@ def main():
         m = run_episode(env, agent, seed=seed + ep, train=True)
         train_log["episode"].append(ep + 1)
         train_log["return"].append(m["return"])
-        train_log["throughput"].append(m["throughput"])
+        train_log["return_per_slot"].append(m["return_per_slot"])
         train_log["tbs"].append(m["tbs"])
         train_log["first_tx_bler"].append(m["first_tx_bler"])
         train_log["epsilon"].append(agent.epsilon)
@@ -256,7 +252,7 @@ def main():
         if (ep + 1) % log_every == 0 or ep == 0:
             print(
                 f"  ep {ep + 1:4d} | return={m['return']:.1f} | "
-                f"throughput={m['throughput']:.4f} | eps={agent.epsilon:.3f} | "
+                f"return/slot={m['return_per_slot']:.4f} | eps={agent.epsilon:.3f} | "
                 f"TBs={m['tbs']} | 1st-tx BLER={m['first_tx_bler']:.3f} | "
                 f"MCS={m['mean_mcs']:.1f} | drops={m['drops']:.1f}"
             )
@@ -325,11 +321,11 @@ def main():
         eval_path,
         eval_seeds=np.asarray(eval_seeds, dtype=np.int64),
         ddqn_return=np.asarray([r["return"] for r in ddqn_rows]),
-        ddqn_throughput=np.asarray([r["throughput"] for r in ddqn_rows]),
+        ddqn_return_per_slot=np.asarray([r["return_per_slot"] for r in ddqn_rows]),
         illa_return=np.asarray([r["return"] for r in illa_rows]),
-        illa_throughput=np.asarray([r["throughput"] for r in illa_rows]),
+        illa_return_per_slot=np.asarray([r["return_per_slot"] for r in illa_rows]),
         olla_return=np.asarray([r["return"] for r in olla_rows]),
-        olla_throughput=np.asarray([r["throughput"] for r in olla_rows]),
+        olla_return_per_slot=np.asarray([r["return_per_slot"] for r in olla_rows]),
         bler_target=bler_target,
         seed=seed,
         episodes=episodes,

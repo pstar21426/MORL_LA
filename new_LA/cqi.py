@@ -64,25 +64,21 @@ def mcs_qm_rate(mcs_index, mcs_min, mcs_max, mcs_table_index=1, mcs_category=1):
 
 
 def mcs_for_ir_rate(rate_eff, qm, mcs_min, mcs_max, mcs_table_index=1, mcs_category=1):
-    # rate_eff: coderate / 재전송 횟수
-    # qm: 초전송의 Qm
-    # 그냥 mi를 더하면 금방 상한을 쳐서 재전송 효율이 너무 좋아져 에이전트가 과도한 재전송을 하게 됨
-    
-    cands = [ # cands: Qm이 초전송과 같은 MCS만 고름
+    # rate_eff = 초전송 부호율 / 전송 횟수(초기 전송 포함).
+    # 같은 Qm에서 그 부호율 이하인 MCS 중 가장 높은 것. 없으면 그 Qm의 최저 MCS.
+    # 합친 MI를 SNR로 바꾸면 상한에 붙어 재전송이 너무 잘 된다.
+    cands = [
         (m, r)
         for m, qq, r in _mcs_qm_rate_table(
             mcs_table_index, mcs_min, mcs_max, mcs_category=mcs_category
         )
         if qq == int(qm)
     ]
-    if not cands: 
+    if not cands:
         return int(mcs_min)
     below = [(m, r) for m, r in cands if r <= float(rate_eff) + 1e-12]
-    # 위에서 고른 cands 중 coderate가 R/n 이하인 것 중 가장 높은 rate의 MCS 반환
     if below:
         return int(max(below, key=lambda x: x[1])[0])
-    # 그런 MCS가 없으면 그 Qm에서 가장 낮은 rate의 MCS 반환
-    # 여기가 좀 휴리스틱한 부분
     return int(min(cands, key=lambda x: x[1])[0])
 
 
@@ -162,13 +158,11 @@ def tbler_from_phy(
         cb_sz = _match_len(_as_int32_vec(cb_size), n)
         n_cb = _match_len(_as_int32_vec(num_cb), n)
         tbs = (n_cb * cb_sz).to(torch.int32)
-    # 위에서 길이 맞춰준 벡터로 BLER 계산
     bler = phy_abs.get_bler(mcs, mcs_table_index, mcs_category, cb_sz, sinr)
     # Missing table entries are Inf; clamp so ACK sampling cannot flip to always-ACK.
     bler = torch.nan_to_num(bler, nan=1.0, posinf=1.0, neginf=1.0)
     bler = torch.clamp(bler, 0.0, 1.0)
     one = torch.ones((), dtype=bler.dtype, device=bler.device)
-    # 위에서 계산한 BLER로 TBLER 계산
     tbler = one - torch.pow(one - bler, n_cb.to(dtype=bler.dtype))
     tbler = torch.clamp(tbler, 0.0, 1.0)
     return tbler, tbs

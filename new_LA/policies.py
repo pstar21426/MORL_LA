@@ -1,4 +1,4 @@
-# ILLA / OLLA / epsilon-greedy baselines (discrete CQI only)
+# ILLA / OLLA / epsilon-greedy baselines
 # + delay-free oracles: true SINR → CQI→MCS, or Sionna InnerLoopLinkAdaptation
 
 import numpy as np

@@ -381,8 +381,6 @@ def main():
     arrivals_201 = {}
 
     for name, choose in choosers.items():
-        if hasattr(choose, "reset"):
-            pass
         for seed in SEEDS:
             if name == "ILLA":
                 illa.reset()

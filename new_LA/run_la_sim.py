@@ -1,4 +1,4 @@
-# ILLA vs OLLA rollout on  DownlinkLAEnv
+# ILLA vs OLLA rollout on DownlinkLAEnv
 
 import argparse
 from pathlib import Path
@@ -24,15 +24,14 @@ def rollout(env, policy, seed):
     log = {k: [] for k in (
         "state", "action", "reward", "next_state", "done",
         "mcs_used", "ack", "tb_success", "dropped", "n_overflow", "lost_se", "delivered_se", "truncated_mid_tb",
-        "num_slots", "num_retx", "delta_tau",
+        "num_slots", "num_retx",
         "sinr_true_db", "sinr_hat_db", "cqi_index", "cqi_norm",
-        "tbler", "tbler_last", "decoded_bits",
+        "tbler", "tbler_last",
     )}
 
     done = False
     while not done:
         action = policy(state, info)
-        delta_tau = float(info.get("delta_tau", 0.0))
         sinr_hat = float(info["sinr_hat_db"])
         cqi_index = int(info["cqi_index"])
         cqi_norm = float(state[0])
@@ -56,14 +55,12 @@ def rollout(env, policy, seed):
         log["truncated_mid_tb"].append(out["truncated_mid_tb"])
         log["num_slots"].append(out["num_slots"])
         log["num_retx"].append(out["num_retx"])
-        log["delta_tau"].append(delta_tau)
         log["sinr_true_db"].append(out["sinr_true_db"])
         log["sinr_hat_db"].append(sinr_hat)
         log["cqi_index"].append(cqi_index)
         log["cqi_norm"].append(cqi_norm)
         log["tbler"].append(out["tbler"])
         log["tbler_last"].append(out["tbler_last"])
-        log["decoded_bits"].append(out["decoded_bits"])
         state = next_state
 
     out = {k: np.asarray(v) for k, v in log.items()}
@@ -79,7 +76,7 @@ def metrics_from_rollout(res, num_slots):
     if n == 0:
         return {
             "return": float(res["reward"].sum()),
-            "throughput": float(res["reward"].sum() / num_slots),
+            "return_per_slot": float(res["reward"].sum() / num_slots),
             "tbs": 0,
             "first_tx_bler": 0.0,
             "tb_fail": 0.0,
@@ -94,7 +91,7 @@ def metrics_from_rollout(res, num_slots):
     )
     return {
         "return": float(res["reward"].sum()),
-        "throughput": float(res["reward"].sum() / num_slots),
+        "return_per_slot": float(res["reward"].sum() / num_slots),
         "tbs": n,
         "first_tx_bler": float(1.0 - res["ack"][served].mean()),
         "tb_fail": tb_fail,
@@ -111,7 +108,7 @@ def summarize(name, res, bler_target, num_slots):
     print(
         f"[{name.upper()}] "
         f"return={m['return']:.1f} | "
-        f"throughput={m['throughput']:.4f} | "
+        f"return/slot={m['return_per_slot']:.4f} | "
         f"TBs={m['tbs']} | "
         f"first-tx BLER={m['first_tx_bler']:.3f} (target {bler_target}) | "
         f"TB fail={m['tb_fail']:.3f} | "
@@ -124,7 +121,7 @@ def summarize(name, res, bler_target, num_slots):
 
 def aggregate_metrics(rows):
     keys = [
-        "return", "throughput", "tbs", "first_tx_bler", "tb_fail",
+        "return", "return_per_slot", "tbs", "first_tx_bler", "tb_fail",
         "mean_mcs", "mean_slots_tb", "drops",
     ]
     out = {}
@@ -139,7 +136,7 @@ def print_mean_row(name, agg, bler_target):
     print(
         f"[{name.upper():>5}] "
         f"return={agg['return_mean']:7.1f} ± {agg['return_std']:.1f} | "
-        f"throughput={agg['throughput_mean']:.4f} ± {agg['throughput_std']:.4f} | "
+        f"return/slot={agg['return_per_slot_mean']:.4f} ± {agg['return_per_slot_std']:.4f} | "
         f"TBs={agg['tbs_mean']:.0f} | "
         f"1st-tx BLER={agg['first_tx_bler_mean']:.3f} ± {agg['first_tx_bler_std']:.3f} "
         f"(tgt {bler_target}) | "
@@ -434,10 +431,10 @@ def main():
             num_slots=num_slots,
             bler_target=bler_target,
             illa_return=np.asarray([r["return"] for r in illa_rows]),
-            illa_throughput=np.asarray([r["throughput"] for r in illa_rows]),
+            illa_return_per_slot=np.asarray([r["return_per_slot"] for r in illa_rows]),
             illa_first_tx_bler=np.asarray([r["first_tx_bler"] for r in illa_rows]),
             olla_return=np.asarray([r["return"] for r in olla_rows]),
-            olla_throughput=np.asarray([r["throughput"] for r in olla_rows]),
+            olla_return_per_slot=np.asarray([r["return_per_slot"] for r in olla_rows]),
             olla_first_tx_bler=np.asarray([r["first_tx_bler"] for r in olla_rows]),
             **{f"illa_{k}": v for k, v in illa_agg.items()},
             **{f"olla_{k}": v for k, v in olla_agg.items()},

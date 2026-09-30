@@ -24,7 +24,7 @@ def generate_sinr_db_trace(
 
     if mean_range_db is None:
         mu = np.full(num_slots, float(mean_db))
-    else: # 매 슬롯마다 mu_t를 설정,지금은 작동하지 않게 mu 고정
+    else:  # (lo, hi)에서 시작 평균을 뽑고, mean_change_prob마다 다시 뽑는다.
         lo, hi = mean_range_db
         mu = np.empty(num_slots)
         current = rng.uniform(lo, hi)

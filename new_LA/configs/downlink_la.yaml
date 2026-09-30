@@ -35,17 +35,17 @@ olla_step_up_db: 0.1
 # harq_retx_gap_slots: 재전송 앞에 비우는 슬롯. 그 슬롯은 도착만 한다.
 harq_max_retx: 3
 harq_retx_gap_slots: 3
-drop_penalty: 3.0         # 포기한 비트/RE 에 곱함. 오버플로는 1배.
+drop_penalty: 0.0         # HARQ 포기 보상은 0. 전달되지 않은 비트는 D에 없다.
 
 # 결정 시점 state: [cqi_n, past_cqi×L, m×L, b×L, queue/capacity]
 state_num_lags: 3
 
 # 비트 버퍼. RB 수는 고정. 슬롯마다 아래 범위의 비트가 균등 도착한다.
-# 상태 큐 = 비트/용량. ACK 보상 = 전달 비트/RE. 오버플로 비용 = penalty × (넘친 비트/RE).
+# 상태 큐 = 비트/용량. ACK 보상 = 전달 비트/RE. 오버플로는 보상에서 빼지 않는다.
 arrival_bits_min: 300
 arrival_bits_max: 500
 queue_capacity: 15000
-overflow_penalty: 1.0
+overflow_penalty: 0.0
 
 # run_la_sim 평가 시드. null이면 [seed]만
 eval_seeds: [0, 1, 2, 3, 4]
