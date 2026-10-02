@@ -91,13 +91,13 @@ class DownlinkLAEnv(gym.Env):
         cqi_bler_target=0.1,
         ack_delay_slots=0,
         harq_max_retx=2,
-        drop_penalty=3.0,
+        drop_penalty=0.0,
         harq_retx_gap_slots=3,
         state_num_lags=3,
         arrival_bits_min=400,
         arrival_bits_max=800,
         queue_capacity=15000,
-        overflow_penalty=1.0,
+        overflow_penalty=0.0,
         phy_abs=None,
     ):
         super().__init__()
