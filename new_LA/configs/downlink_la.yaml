@@ -15,11 +15,24 @@ sinr_max_db: 30.0
 # null이면 sinr_mean_db 고정. 범위 주면 에피소드 중 평균 SINR이 가끔 바뀜
 sinr_mean_range_db: null
 sinr_mean_change_prob: 0.0
+# 1이면 위의 rho가 AR(1). 2이면 phi1은 sinr_ar_phi1(없으면 rho), phi2는 sinr_ar_phi2.
+sinr_ar_order: 1
+sinr_ar_phi1: null
+sinr_ar_phi2: 0.0
 
 # CQI 양자화 전 CSI 오차 (진짜 SINR에 delay + 잡음 + 편향)
 # cqi_bias_db > 0 이면 CQI용 SINR이 데이터 채널보다 낙관적
 cqi_noise_std_db: 1.5
 cqi_bias_db: 3.0
+# [lo, hi]면 에피소드마다 편향을 하나 뽑고, 그 값이 cqi_bias_db를 대신한다.
+cqi_bias_range_db: null
+# 디코딩 SINR만 손상된다. CQI는 손상 전 SINR을 본다. null/0이면 꺼짐.
+decoding_evm_db: null
+# 버스트: 켜진 슬롯은 디코딩 SINR에서 atten_db를 뺀다. CQI는 버스트 전 SINR을 본다.
+# 켜짐/꺼짐 길이는 기하분포(평균 on/off 슬롯). 0이면 꺼짐.
+burst_atten_db: 8.0
+burst_mean_on_slots: 20
+burst_mean_off_slots: 80
 # null이면 에피소드마다 delay를 1~4 사이 정수 하나 뽑음. 정수면 고정 delay
 cqi_delay_slots: 3
 # 매 슬롯 CQI = TBLER(MCS(q), SINR_hat) ≤ target 인 최대 q
@@ -64,7 +77,10 @@ ddqn:
   hidden: 256
   buffer_size: 100000
   batch_size: 64
-  gamma: 0.99
+  gamma: 0.99             # 슬롯당 할인. 백업은 gamma ** (그 TB가 쓴 슬롯 수)
+  # rate: 학습 보상 r - rho * tau, rho는 에피소드 슬롯당 처리율의 EMA. discount: 보상 r 그대로
+  objective: rate
+  rho_ema: 0.1
   lr: 0.001
   target_sync: 200
   epsilon_start: 1.0

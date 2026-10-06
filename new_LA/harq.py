@@ -50,6 +50,14 @@ def snr_db_from_mi(mod, mi):
     return float(np.interp(mi, _mi_table(mod), _SNR_DB_GRID))
 
 
+def mi_from_snr_db_vec(mod, snr_db):
+    return np.interp(np.asarray(snr_db, dtype=np.float64), _SNR_DB_GRID, _mi_table(mod))
+
+
+def snr_db_from_mi_vec(mod, mi):
+    return np.interp(np.asarray(mi, dtype=np.float64), _mi_table(mod), _SNR_DB_GRID)
+
+
 
 class HarqProcess:
     def __init__(self, max_retx=2):

@@ -1,4 +1,8 @@
 # Double DQN for DownlinkLAEnv (decision-step, state-only policy)
+# One step is one TB (or one idle slot). gamma is per slot, so the backup
+# discounts the next decision by gamma ** tau, tau = slots the step occupied.
+# If rho is set, the learner reward is r - rho * tau (Dinkelbach form of the
+# slot-rate objective). The buffer keeps raw r and tau, so rho can change.
 
 from collections import deque
 from dataclasses import dataclass
@@ -32,6 +36,7 @@ class Transition:
     reward: float
     next_state: np.ndarray
     terminated: bool
+    slots: int = 1
 
 
 class ReplayBuffer:
@@ -54,7 +59,8 @@ class ReplayBuffer:
             [np.asarray(t.next_state, dtype=np.float32) for t in batch]
         )
         dones = np.asarray([t.terminated for t in batch], dtype=np.float32)
-        return states, actions, rewards, next_states, dones
+        slots = np.asarray([t.slots for t in batch], dtype=np.float32)
+        return states, actions, rewards, next_states, dones, slots
 
 
 class DDQNAgent:
@@ -72,10 +78,12 @@ class DDQNAgent:
         epsilon_start: float = 1.0,
         epsilon_end: float = 0.01,
         epsilon_decay_steps: int = 5_000,
+        rho: Optional[float] = None,
         device: Optional[str] = None,
     ):
         self.n_actions = n_actions
         self.gamma = gamma
+        self.rho = rho
         self.batch_size = batch_size
         self.target_sync = target_sync
         self.epsilon_start = epsilon_start
@@ -115,7 +123,7 @@ class DDQNAgent:
         if len(self.buffer) < self.batch_size:
             return None
 
-        states, actions, rewards, next_states, dones = self.buffer.sample(
+        states, actions, rewards, next_states, dones, slots = self.buffer.sample(
             self.batch_size
         )
         states_t = torch.from_numpy(states).to(self.device)
@@ -123,13 +131,17 @@ class DDQNAgent:
         rewards_t = torch.from_numpy(rewards).to(self.device)
         next_states_t = torch.from_numpy(next_states).to(self.device)
         dones_t = torch.from_numpy(dones).to(self.device)
+        slots_t = torch.from_numpy(slots).to(self.device)
+        discount_t = self.gamma ** slots_t
+        if self.rho is not None:
+            rewards_t = rewards_t - float(self.rho) * slots_t
 
         q_sa = self.q(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
             # Double DQN: online net selects action, target net evaluates it
             next_act = self.q(next_states_t).argmax(dim=1)
             next_q = self.q_target(next_states_t).gather(1, next_act.unsqueeze(1)).squeeze(1)
-            target = rewards_t + self.gamma * next_q * (1.0 - dones_t)
+            target = rewards_t + discount_t * next_q * (1.0 - dones_t)
 
         loss = nn.functional.mse_loss(q_sa, target)
         self.opt.zero_grad()

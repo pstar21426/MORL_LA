@@ -17,7 +17,7 @@ from sionna.phy import config as sionna_config
 from sionna.phy.utils import db_to_lin
 from sionna.sys import PHYAbstraction
 
-from channel import add_cqi_noise, generate_sinr_db_trace
+from channel import add_cqi_noise, generate_sinr_db_trace, impair_decoding_sinr
 from cqi import (
     build_cqi_to_mcs,
     mcs_for_ir_rate,
@@ -98,6 +98,14 @@ class DownlinkLAEnv(gym.Env):
         arrival_bits_max=800,
         queue_capacity=15000,
         overflow_penalty=0.0,
+        sinr_ar_order=1,
+        sinr_ar_phi1=None,
+        sinr_ar_phi2=0.0,
+        cqi_bias_range_db=None,
+        decoding_evm_db=None,
+        burst_atten_db=0.0,
+        burst_mean_on_slots=20.0,
+        burst_mean_off_slots=80.0,
         phy_abs=None,
     ):
         super().__init__()
@@ -127,6 +135,17 @@ class DownlinkLAEnv(gym.Env):
         self.arrival_bits_max = max(self.arrival_bits_min, int(arrival_bits_max))
         self.queue_capacity = max(1, int(queue_capacity))
         self.overflow_penalty = float(overflow_penalty)
+        self.sinr_ar_order = int(sinr_ar_order)
+        self.sinr_ar_phi1 = None if sinr_ar_phi1 is None else float(sinr_ar_phi1)
+        self.sinr_ar_phi2 = float(sinr_ar_phi2)
+        self.cqi_bias_range_db = (
+            None if cqi_bias_range_db is None else tuple(cqi_bias_range_db)
+        )
+        self.decoding_evm_db = None if decoding_evm_db is None else float(decoding_evm_db)
+        self.burst_atten_db = float(burst_atten_db)
+        self.burst_mean_on_slots = float(burst_mean_on_slots)
+        self.burst_mean_off_slots = float(burst_mean_off_slots)
+        self._cqi_bias_used = float(self.cqi_bias_db)
 
         self.phy_abs = phy_abs if phy_abs is not None else PHYAbstraction()
         self.harq = HarqProcess(max_retx=harq_max_retx)
@@ -234,6 +253,7 @@ class DownlinkLAEnv(gym.Env):
             "cqi_delay_slots": self._delay_used,
             "ack_delay_slots": self.ack_delay_slots,
             "queue": int(self._q),
+            "cqi_bias_db": float(self._cqi_bias_used),
         }
         if outcome is not None:
             info["outcome"] = outcome
@@ -242,26 +262,48 @@ class DownlinkLAEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
 
+        phi1 = self.sinr_ar_rho if self.sinr_ar_phi1 is None else self.sinr_ar_phi1
         self._sinr_true_db = generate_sinr_db_trace(
             num_slots=self.num_slots,
             mean_db=self.sinr_mean_db,
-            rho=self.sinr_ar_rho,
+            rho=self.sinr_ar_rho if self.sinr_ar_order == 1 else phi1,
             innov_std_db=self.sinr_innov_std_db,
             sinr_min_db=self.sinr_min_db,
             sinr_max_db=self.sinr_max_db,
             mean_range_db=self.sinr_mean_range_db,
             mean_change_prob=self.sinr_mean_change_prob,
             seed=seed,
+            ar_order=self.sinr_ar_order,
+            phi2=self.sinr_ar_phi2,
         )
+        if self.cqi_bias_range_db is None:
+            self._cqi_bias_used = float(self.cqi_bias_db)
+        else:
+            lo, hi = self.cqi_bias_range_db
+            bias_rng = np.random.default_rng(None if seed is None else int(seed) + 17)
+            self._cqi_bias_used = float(bias_rng.uniform(float(lo), float(hi)))
+        # CQI는 손상 전 SINR을 본다. EVM과 버스트는 디코딩 SINR에만 넣는다.
+        clean = self._sinr_true_db
         self._sinr_fb_db, self._delay_used = add_cqi_noise(
-            self._sinr_true_db,
+            clean,
             noise_std_db=self.cqi_noise_std_db,
-            bias_db=self.cqi_bias_db,
+            bias_db=self._cqi_bias_used,
             delay_slots=self.cqi_delay_slots,
             seed=None if seed is None else seed + 1,
             sinr_min_db=self.sinr_min_db,
             sinr_max_db=self.sinr_max_db,
         )
+        if (self.decoding_evm_db is not None and self.decoding_evm_db > 0.0) or self.burst_atten_db > 0.0:
+            self._sinr_true_db = impair_decoding_sinr(
+                clean,
+                evm_db=self.decoding_evm_db,
+                burst_atten_db=self.burst_atten_db,
+                burst_mean_on=self.burst_mean_on_slots,
+                burst_mean_off=self.burst_mean_off_slots,
+                burst_seed=None if seed is None else int(seed) + 11,
+                sinr_min_db=self.sinr_min_db,
+                sinr_max_db=self.sinr_max_db,
+            )
         self.harq.reset()
         self.hist.reset()
         self._ack_seed = (
@@ -589,6 +631,14 @@ class DownlinkLAEnv(gym.Env):
             "arrival_bits_max",
             "queue_capacity",
             "overflow_penalty",
+            "sinr_ar_order",
+            "sinr_ar_phi1",
+            "sinr_ar_phi2",
+            "cqi_bias_range_db",
+            "decoding_evm_db",
+            "burst_atten_db",
+            "burst_mean_on_slots",
+            "burst_mean_off_slots",
         )
         kwargs = {k: cfg[k] for k in keys if k in cfg}
         return cls(phy_abs=phy_abs, **kwargs)

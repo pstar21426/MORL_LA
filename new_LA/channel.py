@@ -13,6 +13,8 @@ def generate_sinr_db_trace(
     mean_range_db=None,  # (lo, hi) -> randomize the operating point
     mean_change_prob=0.0,  # per-slot probability of re-drawing it
     seed=None,
+    ar_order=1,
+    phi2=0.0,
 ):
     rng = np.random.default_rng(seed)
     rho = float(rho)
@@ -33,13 +35,79 @@ def generate_sinr_db_trace(
                 current = rng.uniform(lo, hi)
             mu[t] = current
 
+    if int(ar_order) == 1:
+        gamma = np.empty(num_slots)
+        dev = stat_std * rng.standard_normal()
+        gamma[0] = mu[0] + dev
+        for t in range(num_slots - 1):
+            dev = rho * dev + innov * rng.standard_normal()
+            gamma[t + 1] = mu[t + 1] + dev
+        return np.clip(gamma, sinr_min_db, sinr_max_db)
+
+    # AR(2): rho is phi1. Stationary variance matches
+    # innov^2 * (1-phi2) / ((1+phi2)((1-phi2)^2 - phi1^2)).
+    phi1 = rho
+    phi2 = float(phi2)
+    scale = ar2_std_per_innov(phi1, phi2)
+    var = (innov * scale) ** 2
+    cov1 = phi1 / (1.0 - phi2) * var
+    std = np.sqrt(var)
+    corr = cov1 / var
+    z0 = rng.standard_normal()
+    z1 = rng.standard_normal()
+    x_prev = std * z0
+    x = corr * x_prev + std * np.sqrt(max(0.0, 1.0 - corr * corr)) * z1
     gamma = np.empty(num_slots)
-    dev = stat_std * rng.standard_normal()
-    gamma[0] = mu[0] + dev
+    gamma[0] = mu[0] + x
     for t in range(num_slots - 1):
-        dev = rho * dev + innov * rng.standard_normal()
-        gamma[t + 1] = mu[t + 1] + dev
+        x_next = phi1 * x + phi2 * x_prev + innov * rng.standard_normal()
+        x_prev = x
+        x = x_next
+        gamma[t + 1] = mu[t + 1] + x
     return np.clip(gamma, sinr_min_db, sinr_max_db)
+
+
+def ar2_std_per_innov(phi1, phi2):
+    # Stationary std of x_t = phi1 x_{t-1} + phi2 x_{t-2} + e_t, divided by std(e).
+    phi1 = float(phi1)
+    phi2 = float(phi2)
+    if abs(phi2) >= 1.0 or (phi1 + phi2) >= 1.0 or (phi2 - phi1) >= 1.0:
+        raise ValueError(f"AR(2) not stationary: phi1={phi1}, phi2={phi2}")
+    disc = (1.0 - phi2) ** 2 - phi1 ** 2
+    denom = (1.0 + phi2) * disc
+    if denom <= 0.0:
+        raise ValueError(f"AR(2) variance undefined: phi1={phi1}, phi2={phi2}")
+    return float(np.sqrt((1.0 - phi2) / denom))
+
+
+def impair_decoding_sinr(
+    sinr_db,
+    evm_db=None,
+    burst_atten_db=0.0,
+    burst_mean_on=20.0,
+    burst_mean_off=80.0,
+    burst_seed=None,
+    sinr_min_db=-5.0,
+    sinr_max_db=30.0,
+):
+    # CQI는 이 함수를 거치기 전의 SINR로 만든다.
+    # EVM: 1/g_dec = 1/g + 1/g_evm (선형). 버스트: 켜진 슬롯만 atten_db를 뺀다.
+    g = np.array(sinr_db, dtype=np.float64, copy=True)
+    if evm_db is not None and float(evm_db) > 0.0:
+        evm = float(evm_db)
+        g = -10.0 * np.log10(10.0 ** (-g / 10.0) + 10.0 ** (-evm / 10.0))
+    atten = float(burst_atten_db)
+    if atten > 0.0:
+        rng = np.random.default_rng(burst_seed)
+        on = False
+        mask = np.zeros(g.shape[0], dtype=bool)
+        p_leave = 1.0 / float(burst_mean_on)
+        p_enter = 1.0 / float(burst_mean_off)
+        for t in range(g.shape[0]):
+            on = (rng.random() >= p_leave) if on else (rng.random() < p_enter)
+            mask[t] = on
+        g = g - np.where(mask, atten, 0.0)
+    return np.clip(g, sinr_min_db, sinr_max_db)
 
 
 def add_cqi_noise(

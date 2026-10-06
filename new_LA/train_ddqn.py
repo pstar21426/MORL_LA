@@ -39,9 +39,9 @@ def _rollout(env, choose_action, seed, on_transition=None):
         action = choose_action(state, info)
         next_state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
-        if on_transition is not None:
-            on_transition(state, action, reward, next_state, terminated, truncated)
         out = info["outcome"]
+        if on_transition is not None:
+            on_transition(state, action, reward, next_state, terminated, truncated, out)
         st["ret"] += reward
         st["drops"] += float(out.get("lost_se", 0.0))
         if out.get("idle"):
@@ -56,11 +56,13 @@ def _rollout(env, choose_action, seed, on_transition=None):
 
 
 def run_episode(env, agent, seed, *, train=True, greedy=False):
-    def on_transition(state, action, reward, next_state, terminated, truncated):
+    def on_transition(state, action, reward, next_state, terminated, truncated, out):
         if not train:
             return
         # time-limit truncated is not a true terminal; still bootstrap Q
         del truncated
+        # idle outcomes report num_slots=0 but still consume one slot
+        slots = 1 if out.get("idle") else max(int(out["num_slots"]), 1)
         agent.push(
             Transition(
                 state=state,
@@ -68,6 +70,7 @@ def run_episode(env, agent, seed, *, train=True, greedy=False):
                 reward=float(reward),
                 next_state=next_state,
                 terminated=bool(terminated),
+                slots=slots,
             )
         )
         agent.train_step()
@@ -155,6 +158,8 @@ def main():
     p.add_argument("--epsilon-start", type=float, default=None)
     p.add_argument("--epsilon-end", type=float, default=None)
     p.add_argument("--log-every", type=int, default=None)
+    p.add_argument("--objective", choices=("discount", "rate"), default=None)
+    p.add_argument("--rho-ema", type=float, default=None)
     p.add_argument("--out-dir", type=Path, default=None)
     args = p.parse_args()
 
@@ -192,6 +197,8 @@ def main():
     )
     decay_cfg = ddqn_cfg.get("epsilon_decay_steps")
     decay_steps = int(decay_cfg) if decay_cfg is not None else max(episodes * 100, 5_000)
+    objective = args.objective or ddqn_cfg.get("objective", "discount")
+    rho_ema = float(args.rho_ema if args.rho_ema is not None else ddqn_cfg.get("rho_ema", 0.1))
 
     np.random.seed(seed)
     seed_phy(seed)
@@ -220,12 +227,14 @@ def main():
         epsilon_start=epsilon_start,
         epsilon_end=epsilon_end,
         epsilon_decay_steps=decay_steps,
+        rho=0.0 if objective == "rate" else None,
     )
 
     print(
         f"=== DDQN train ({episodes} eps) state={state_dim} "
         f"actions={n_actions} hidden={hidden} "
-        f"buffer={buffer_size} eps_end={epsilon_end} ==="
+        f"buffer={buffer_size} eps_end={epsilon_end} "
+        f"gamma/slot={gamma} objective={objective} ==="
     )
     train_log = {
         "episode": [],
@@ -236,10 +245,16 @@ def main():
         "epsilon": [],
         "mean_mcs": [],
         "drops": [],
+        "rho": [],
     }
 
     for ep in range(episodes):
         m = run_episode(env, agent, seed=seed + ep, train=True)
+        if agent.rho is not None:
+            # Dinkelbach step: rho tracks the slot rate the current policy achieved
+            ep_rate = m["return_per_slot"]
+            agent.rho = ep_rate if ep == 0 else (1.0 - rho_ema) * agent.rho + rho_ema * ep_rate
+        train_log["rho"].append(np.nan if agent.rho is None else agent.rho)
         train_log["episode"].append(ep + 1)
         train_log["return"].append(m["return"])
         train_log["return_per_slot"].append(m["return_per_slot"])
@@ -250,11 +265,12 @@ def main():
         train_log["drops"].append(m["drops"])
 
         if (ep + 1) % log_every == 0 or ep == 0:
+            rho_txt = "" if agent.rho is None else f" | rho={agent.rho:.3f}"
             print(
                 f"  ep {ep + 1:4d} | return={m['return']:.1f} | "
                 f"return/slot={m['return_per_slot']:.4f} | eps={agent.epsilon:.3f} | "
                 f"TBs={m['tbs']} | 1st-tx BLER={m['first_tx_bler']:.3f} | "
-                f"MCS={m['mean_mcs']:.1f} | drops={m['drops']:.1f}"
+                f"MCS={m['mean_mcs']:.1f} | drops={m['drops']:.1f}{rho_txt}"
             )
 
     log_path = out_dir / f"ddqn_train_log_seed{seed}.npz"
@@ -270,6 +286,9 @@ def main():
             "hidden": hidden,
             "episodes": episodes,
             "epsilon_end": epsilon_end,
+            "gamma": gamma,
+            "objective": objective,
+            "rho": agent.rho,
         },
         ckpt_path,
     )
