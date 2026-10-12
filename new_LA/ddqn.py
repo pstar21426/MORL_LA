@@ -37,6 +37,7 @@ class Transition:
     next_state: np.ndarray
     terminated: bool
     slots: int = 1
+    queue: float = 0.0
 
 
 class ReplayBuffer:
@@ -60,7 +61,8 @@ class ReplayBuffer:
         )
         dones = np.asarray([t.terminated for t in batch], dtype=np.float32)
         slots = np.asarray([t.slots for t in batch], dtype=np.float32)
-        return states, actions, rewards, next_states, dones, slots
+        queues = np.asarray([t.queue for t in batch], dtype=np.float32)
+        return states, actions, rewards, next_states, dones, slots, queues
 
 
 class DDQNAgent:
@@ -123,7 +125,7 @@ class DDQNAgent:
         if len(self.buffer) < self.batch_size:
             return None
 
-        states, actions, rewards, next_states, dones, slots = self.buffer.sample(
+        states, actions, rewards, next_states, dones, slots, _queues = self.buffer.sample(
             self.batch_size
         )
         states_t = torch.from_numpy(states).to(self.device)
@@ -156,3 +158,184 @@ class DDQNAgent:
     def train_step(self) -> None:
         self.total_steps += 1
         self.update()
+
+
+class ScoreResidualAgent:
+    # Action value = one-step table score + a bounded residual.
+    # score = p * min(queue, TBS) / N_RE - rho * tau, with the same smoothing
+    # as the contextual bandit. The network is trained only on the one-step
+    # residual (r - rho * tau - score) and squashed to ±residual_limit, so it
+    # cannot override a score gap larger than that limit. There is no bootstrap.
+    uses_score = True
+
+    def __init__(
+        self,
+        state_dim: int,
+        n_actions: int,
+        tbs: np.ndarray,
+        *,
+        n_re: float,
+        mcs_min: int,
+        num_lags: int = 3,
+        n_cqi: int = 16,
+        n_nack: int = 3,
+        residual_limit: float = 0.05,
+        hidden: int = 256,
+        lr: float = 1e-3,
+        buffer_size: int = 100_000,
+        batch_size: int = 64,
+        epsilon_start: float = 0.5,
+        epsilon_end: float = 0.05,
+        epsilon_decay_steps: int = 200_000,
+        rho: float = 1.0,
+        device: Optional[str] = None,
+    ):
+        self.n_actions = int(n_actions)
+        self.n_re = float(n_re)
+        self.mcs_min = int(mcs_min)
+        self.num_lags = int(num_lags)
+        self.n_cqi = int(n_cqi)
+        self.n_nack = int(n_nack)
+        self.residual_limit = float(residual_limit)
+        self.batch_size = int(batch_size)
+        self.epsilon_start = float(epsilon_start)
+        self.epsilon_end = float(epsilon_end)
+        self.epsilon_decay_steps = int(epsilon_decay_steps)
+        self.rho = float(rho)
+        self.tbs = np.asarray(tbs, dtype=np.float64).reshape(-1)
+        if self.tbs.shape != (self.n_actions,):
+            raise ValueError(f"tbs length {self.tbs.shape} != n_actions {self.n_actions}")
+        shape = (self.n_cqi, self.n_nack, self.n_actions)
+        self.n = np.zeros(shape, dtype=np.float64)
+        self.succ = np.zeros(shape, dtype=np.float64)
+        self.tau_sum = np.zeros(shape, dtype=np.float64)
+        self.total_steps = 0
+        self.use_residual = True
+        self.n_greedy = 0
+        self.n_flip = 0
+        self.last_resid_abs = 0.0
+
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        self.q = QNet(state_dim, n_actions, hidden=hidden).to(self.device)
+        last = self.q.net[-1]
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+        self.opt = optim.Adam(self.q.parameters(), lr=lr)
+        self.buffer = ReplayBuffer(buffer_size)
+
+    @property
+    def epsilon(self) -> float:
+        t = min(self.total_steps, self.epsilon_decay_steps)
+        frac = t / max(self.epsilon_decay_steps, 1)
+        return self.epsilon_start + frac * (self.epsilon_end - self.epsilon_start)
+
+    def context(self, state: np.ndarray) -> Tuple[int, int]:
+        state = np.asarray(state, dtype=np.float32)
+        cqi = int(np.clip(np.rint(float(state[0]) * 15.0), 0, self.n_cqi - 1))
+        a0 = 1 + 2 * self.num_lags
+        acks = state[a0 : a0 + self.num_lags]
+        nack = int(min(int(np.sum(acks == 0.0)), self.n_nack - 1))
+        return cqi, nack
+
+    def scores(self, cqi: int, nack: int, queue_bits: float) -> np.ndarray:
+        n = self.n[cqi, nack]
+        p = (self.succ[cqi, nack] + 1.0) / (n + 2.0)
+        tau = (self.tau_sum[cqi, nack] + 5.0) / (n + 1.0)
+        pay = np.minimum(float(queue_bits), self.tbs) / self.n_re
+        return p * pay - float(self.rho) * tau
+
+    def mcs_map(self, queue_bits: float, nack: int = 0) -> list:
+        return [
+            int(np.argmax(self.scores(cqi, nack, queue_bits))) + self.mcs_min
+            for cqi in range(self.n_cqi)
+        ]
+
+    def select_action(
+        self, state: np.ndarray, *, greedy: bool = False, queue_bits: Optional[float] = None
+    ) -> int:
+        if not greedy and np.random.random() < self.epsilon:
+            return int(np.random.randint(0, self.n_actions))
+        if queue_bits is None:
+            raise ValueError("score action needs the decision-time queue in bits")
+        cqi, nack = self.context(state)
+        score = self.scores(cqi, nack, queue_bits)
+        base = int(np.argmax(score))
+        if not self.use_residual or self.residual_limit <= 0.0:
+            if greedy:
+                self.n_greedy += 1
+            return base
+        s = torch.from_numpy(np.asarray(state, dtype=np.float32)).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            resid = (
+                self.residual_limit * torch.tanh(self.q(s))
+            ).squeeze(0).detach().cpu().numpy()
+        chosen = int(np.argmax(score + resid))
+        if greedy:
+            self.n_greedy += 1
+            self.n_flip += int(chosen != base)
+        return chosen
+
+    def observe(
+        self,
+        state: np.ndarray,
+        action: int,
+        reward: float,
+        slots: int,
+        queue_bits: float,
+        *,
+        idle: bool,
+        truncated_mid: bool,
+    ) -> None:
+        self.total_steps += 1
+        if idle or truncated_mid:
+            return
+        cqi, nack = self.context(state)
+        self.n[cqi, nack, action] += 1.0
+        self.succ[cqi, nack, action] += float(reward > 0.0)
+        self.tau_sum[cqi, nack, action] += float(slots)
+        self.buffer.push(
+            Transition(
+                state=np.asarray(state, dtype=np.float32),
+                action=int(action),
+                reward=float(reward),
+                next_state=np.asarray(state, dtype=np.float32),
+                terminated=False,
+                slots=int(slots),
+                queue=float(queue_bits),
+            )
+        )
+        self.update()
+
+    def update(self) -> Optional[float]:
+        if len(self.buffer) < self.batch_size:
+            return None
+        states, actions, rewards, _next, _dones, slots, queues = self.buffer.sample(
+            self.batch_size
+        )
+        cqi = np.clip(np.rint(states[:, 0] * 15.0), 0, self.n_cqi - 1).astype(np.int64)
+        a0 = 1 + 2 * self.num_lags
+        acks = states[:, a0 : a0 + self.num_lags]
+        nack = np.minimum((acks == 0.0).sum(axis=1), self.n_nack - 1).astype(np.int64)
+        n = self.n[cqi, nack]
+        p = (self.succ[cqi, nack] + 1.0) / (n + 2.0)
+        tau = (self.tau_sum[cqi, nack] + 5.0) / (n + 1.0)
+        pay = np.minimum(queues[:, None], self.tbs[None, :]) / self.n_re
+        score = p * pay - float(self.rho) * tau
+        score_a = score[np.arange(actions.shape[0]), actions]
+        target = rewards - float(self.rho) * slots - score_a
+
+        states_t = torch.from_numpy(states).to(self.device)
+        actions_t = torch.from_numpy(actions).to(self.device)
+        target_t = torch.from_numpy(target.astype(np.float32)).to(self.device)
+        pred = (self.residual_limit * torch.tanh(self.q(states_t))).gather(
+            1, actions_t.unsqueeze(1)
+        ).squeeze(1)
+        loss = nn.functional.mse_loss(pred, target_t)
+        self.opt.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.q.parameters(), 1.0)
+        self.opt.step()
+        self.last_resid_abs = float(pred.detach().abs().mean().item())
+        return float(loss.item())

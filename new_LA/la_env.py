@@ -106,6 +106,7 @@ class DownlinkLAEnv(gym.Env):
         burst_atten_db=0.0,
         burst_mean_on_slots=20.0,
         burst_mean_off_slots=80.0,
+        queue_feat="capacity",
         phy_abs=None,
     ):
         super().__init__()
@@ -145,6 +146,9 @@ class DownlinkLAEnv(gym.Env):
         self.burst_atten_db = float(burst_atten_db)
         self.burst_mean_on_slots = float(burst_mean_on_slots)
         self.burst_mean_off_slots = float(burst_mean_off_slots)
+        if queue_feat not in ("capacity", "tbs"):
+            raise ValueError(f"queue_feat must be capacity or tbs, got {queue_feat}")
+        self.queue_feat = queue_feat
         self._cqi_bias_used = float(self.cqi_bias_db)
 
         self.phy_abs = phy_abs if phy_abs is not None else PHYAbstraction()
@@ -173,6 +177,16 @@ class DownlinkLAEnv(gym.Env):
         self.observation_space = self.state_space
 
         self._num_re_t = torch.tensor([self.num_allocated_re], dtype=torch.int32)
+        if self.queue_feat == "tbs":
+            tbs_top, _, _ = tb_layout_from_mcs(
+                self.mcs_max,
+                self._num_re_t,
+                mcs_table_index=self.mcs_table_index,
+                mcs_category=self.mcs_category,
+            )
+            self.queue_feat_scale = float(max(_item_int(tbs_top), 1))
+        else:
+            self.queue_feat_scale = float(self.queue_capacity)
         self._sinr_true_db = np.zeros(self.num_slots)
         self._sinr_fb_db = np.zeros(self.num_slots)
         self._delay_used = 0
@@ -223,7 +237,9 @@ class DownlinkLAEnv(gym.Env):
     def _state(self, cqi_index=None):
         if cqi_index is None:
             cqi_index = self._report_cqi_at(self._t)
-        q_norm = float(self._q) / float(self.queue_capacity)
+        # capacity: 비트/용량. tbs: 비트/최대 TBS. 최대 TBS를 넘으면 페이로드가 더는 안 늘어 1로 자른다.
+        q_norm = float(self._q) / float(self.queue_feat_scale)
+        q_norm = float(min(max(q_norm, 0.0), 1.0))
         return np.array(
             [
                 normalize_cqi(cqi_index),
@@ -639,6 +655,7 @@ class DownlinkLAEnv(gym.Env):
             "burst_atten_db",
             "burst_mean_on_slots",
             "burst_mean_off_slots",
+            "queue_feat",
         )
         kwargs = {k: cfg[k] for k in keys if k in cfg}
         return cls(phy_abs=phy_abs, **kwargs)

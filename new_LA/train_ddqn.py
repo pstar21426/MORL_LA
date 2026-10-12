@@ -8,8 +8,9 @@ import torch
 import yaml
 from sionna.sys import PHYAbstraction
 
-from ddqn import DDQNAgent, Transition
-from la_env import DownlinkLAEnv, seed_phy
+from cqi import tb_layout_from_mcs
+from ddqn import DDQNAgent, ScoreResidualAgent, Transition
+from la_env import DownlinkLAEnv, _item_int, seed_phy
 from policies import make_baseline_policy
 
 
@@ -36,12 +37,15 @@ def _rollout(env, choose_action, seed, on_transition=None):
     st = dict(ret=0.0, tbs=0, n_ack=0, n_slots=0, mcs_sum=0.0, drops=0)
     done = False
     while not done:
+        queue_bits = int(info["queue"])
         action = choose_action(state, info)
         next_state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         out = info["outcome"]
         if on_transition is not None:
-            on_transition(state, action, reward, next_state, terminated, truncated, out)
+            on_transition(
+                state, action, reward, next_state, terminated, truncated, out, queue_bits
+            )
         st["ret"] += reward
         st["drops"] += float(out.get("lost_se", 0.0))
         if out.get("idle"):
@@ -56,13 +60,26 @@ def _rollout(env, choose_action, seed, on_transition=None):
 
 
 def run_episode(env, agent, seed, *, train=True, greedy=False):
-    def on_transition(state, action, reward, next_state, terminated, truncated, out):
+    score_agent = bool(getattr(agent, "uses_score", False))
+
+    def on_transition(state, action, reward, next_state, terminated, truncated, out, queue_bits):
         if not train:
             return
         # time-limit truncated is not a true terminal; still bootstrap Q
         del truncated
         # idle outcomes report num_slots=0 but still consume one slot
         slots = 1 if out.get("idle") else max(int(out["num_slots"]), 1)
+        if score_agent:
+            agent.observe(
+                state,
+                action,
+                float(reward),
+                slots,
+                queue_bits,
+                idle=bool(out.get("idle")),
+                truncated_mid=bool(out.get("truncated_mid_tb")),
+            )
+            return
         agent.push(
             Transition(
                 state=state,
@@ -71,16 +88,30 @@ def run_episode(env, agent, seed, *, train=True, greedy=False):
                 next_state=next_state,
                 terminated=bool(terminated),
                 slots=slots,
+                queue=float(queue_bits),
             )
         )
         agent.train_step()
 
-    return _rollout(
-        env,
-        lambda state, _info: agent.select_action(state, greedy=greedy),
-        seed,
-        on_transition=on_transition,
-    )
+    def choose(state, info):
+        if score_agent:
+            return agent.select_action(state, greedy=greedy, queue_bits=info["queue"])
+        return agent.select_action(state, greedy=greedy)
+
+    return _rollout(env, choose, seed, on_transition=on_transition)
+
+
+def action_tbs(env):
+    vals = []
+    for action in range(env.action_space.n):
+        tbs_t, _, _ = tb_layout_from_mcs(
+            env.mcs_from_action(action),
+            env._num_re_t,
+            mcs_table_index=env.mcs_table_index,
+            mcs_category=env.mcs_category,
+        )
+        vals.append(_item_int(tbs_t))
+    return np.asarray(vals, dtype=np.float64)
 
 
 def rollout_rule(env, policy, seed):
@@ -158,8 +189,24 @@ def main():
     p.add_argument("--epsilon-start", type=float, default=None)
     p.add_argument("--epsilon-end", type=float, default=None)
     p.add_argument("--log-every", type=int, default=None)
-    p.add_argument("--objective", choices=("discount", "rate"), default=None)
+    p.add_argument("--objective", choices=("discount", "rate", "score"), default=None)
     p.add_argument("--rho-ema", type=float, default=None)
+    p.add_argument("--epsilon-decay-steps", type=int, default=None)
+    p.add_argument(
+        "--probe-every",
+        type=int,
+        default=0,
+        help="rate objective: set rho from a greedy probe episode every N eps (seed + 2000 + ep), "
+        "rho <- (rho + probe rate) / 2, instead of the EMA of training episodes",
+    )
+    p.add_argument("--rho0", type=float, default=1.0, help="initial rho with --probe-every")
+    p.add_argument("--queue-feat", choices=("capacity", "tbs"), default=None)
+    p.add_argument(
+        "--residual-limit",
+        type=float,
+        default=0.05,
+        help="score objective: residual network is squashed to ±this, in the same units as the one-step score",
+    )
     p.add_argument("--out-dir", type=Path, default=None)
     args = p.parse_args()
 
@@ -195,10 +242,14 @@ def main():
         if args.epsilon_end is not None
         else ddqn_cfg.get("epsilon_end", 0.01)
     )
-    decay_cfg = ddqn_cfg.get("epsilon_decay_steps")
+    decay_cfg = args.epsilon_decay_steps or ddqn_cfg.get("epsilon_decay_steps")
     decay_steps = int(decay_cfg) if decay_cfg is not None else max(episodes * 100, 5_000)
     objective = args.objective or ddqn_cfg.get("objective", "discount")
     rho_ema = float(args.rho_ema if args.rho_ema is not None else ddqn_cfg.get("rho_ema", 0.1))
+    if args.queue_feat is not None:
+        cfg["queue_feat"] = args.queue_feat
+    elif objective == "score":
+        cfg["queue_feat"] = "tbs"
 
     np.random.seed(seed)
     seed_phy(seed)
@@ -215,26 +266,52 @@ def main():
     state_dim = int(np.prod(env.state_space.shape))
     n_actions = env.action_space.n
 
-    agent = DDQNAgent(
-        state_dim,
-        n_actions,
-        hidden=hidden,
-        gamma=gamma,
-        lr=lr,
-        buffer_size=buffer_size,
-        batch_size=batch_size,
-        target_sync=int(ddqn_cfg.get("target_sync", 200)),
-        epsilon_start=epsilon_start,
-        epsilon_end=epsilon_end,
-        epsilon_decay_steps=decay_steps,
-        rho=0.0 if objective == "rate" else None,
-    )
+    if objective == "score":
+        rho_init = float(args.rho0)
+    elif objective == "rate":
+        rho_init = float(args.rho0) if args.probe_every else 0.0
+    else:
+        rho_init = None
+    if objective == "score":
+        agent = ScoreResidualAgent(
+            state_dim,
+            n_actions,
+            action_tbs(env),
+            n_re=env.num_allocated_re,
+            mcs_min=env.mcs_min,
+            num_lags=env.hist.num_lags,
+            residual_limit=float(args.residual_limit),
+            hidden=hidden,
+            lr=lr,
+            buffer_size=buffer_size,
+            batch_size=batch_size,
+            epsilon_start=epsilon_start,
+            epsilon_end=epsilon_end,
+            epsilon_decay_steps=decay_steps,
+            rho=rho_init,
+        )
+    else:
+        agent = DDQNAgent(
+            state_dim,
+            n_actions,
+            hidden=hidden,
+            gamma=gamma,
+            lr=lr,
+            buffer_size=buffer_size,
+            batch_size=batch_size,
+            target_sync=int(ddqn_cfg.get("target_sync", 200)),
+            epsilon_start=epsilon_start,
+            epsilon_end=epsilon_end,
+            epsilon_decay_steps=decay_steps,
+            rho=rho_init,
+        )
 
     print(
-        f"=== DDQN train ({episodes} eps) state={state_dim} "
+        f"=== {objective} train ({episodes} eps) state={state_dim} "
         f"actions={n_actions} hidden={hidden} "
         f"buffer={buffer_size} eps_end={epsilon_end} "
-        f"gamma/slot={gamma} objective={objective} ==="
+        f"gamma/slot={gamma} queue_feat={env.queue_feat} "
+        f"queue_scale={env.queue_feat_scale:g} ==="
     )
     train_log = {
         "episode": [],
@@ -250,7 +327,11 @@ def main():
 
     for ep in range(episodes):
         m = run_episode(env, agent, seed=seed + ep, train=True)
-        if agent.rho is not None:
+        if agent.rho is not None and args.probe_every:
+            if (ep + 1) % args.probe_every == 0:
+                probe = run_episode(env, agent, seed=seed + 2000 + ep, train=False, greedy=True)
+                agent.rho = 0.5 * agent.rho + 0.5 * probe["return_per_slot"]
+        elif agent.rho is not None:
             # Dinkelbach step: rho tracks the slot rate the current policy achieved
             ep_rate = m["return_per_slot"]
             agent.rho = ep_rate if ep == 0 else (1.0 - rho_ema) * agent.rho + rho_ema * ep_rate
@@ -266,11 +347,14 @@ def main():
 
         if (ep + 1) % log_every == 0 or ep == 0:
             rho_txt = "" if agent.rho is None else f" | rho={agent.rho:.3f}"
+            resid_txt = ""
+            if objective == "score":
+                resid_txt = f" | |R|={agent.last_resid_abs:.4f}"
             print(
                 f"  ep {ep + 1:4d} | return={m['return']:.1f} | "
                 f"return/slot={m['return_per_slot']:.4f} | eps={agent.epsilon:.3f} | "
                 f"TBs={m['tbs']} | 1st-tx BLER={m['first_tx_bler']:.3f} | "
-                f"MCS={m['mean_mcs']:.1f} | drops={m['drops']:.1f}{rho_txt}"
+                f"MCS={m['mean_mcs']:.1f} | drops={m['drops']:.1f}{rho_txt}{resid_txt}"
             )
 
     log_path = out_dir / f"ddqn_train_log_seed{seed}.npz"
@@ -278,20 +362,33 @@ def main():
     print(f"Saved training log -> {log_path}")
 
     ckpt_path = out_dir / f"ddqn_seed{seed}.pt"
-    torch.save(
-        {
-            "q": agent.q.state_dict(),
-            "state_dim": state_dim,
-            "n_actions": n_actions,
-            "hidden": hidden,
-            "episodes": episodes,
-            "epsilon_end": epsilon_end,
-            "gamma": gamma,
-            "objective": objective,
-            "rho": agent.rho,
-        },
-        ckpt_path,
-    )
+    payload = {
+        "q": agent.q.state_dict(),
+        "state_dim": state_dim,
+        "n_actions": n_actions,
+        "hidden": hidden,
+        "episodes": episodes,
+        "epsilon_end": epsilon_end,
+        "gamma": 0.0 if objective == "score" else gamma,
+        "objective": objective,
+        "rho": agent.rho,
+        "queue_feat": env.queue_feat,
+        "queue_scale": env.queue_feat_scale,
+    }
+    if objective == "score":
+        payload.update(
+            n=agent.n,
+            succ=agent.succ,
+            tau_sum=agent.tau_sum,
+            tbs=agent.tbs,
+            residual_limit=agent.residual_limit,
+            mcs_min=agent.mcs_min,
+            num_lags=agent.num_lags,
+        )
+        print("one-step MCS map (nack 0), score only")
+        for q_bits in (400, 800, 2000):
+            print(f"  queue {q_bits:5d}: {agent.mcs_map(q_bits)}")
+    torch.save(payload, ckpt_path)
     print(f"Saved checkpoint -> {ckpt_path}")
 
     if args.eval_seeds is not None:
@@ -311,8 +408,19 @@ def main():
         "olla", env, bler_target=bler_target, olla_step_up_db=olla_step_up_db
     )
 
-    ddqn_rows, illa_rows, olla_rows = [], [], []
+    learner_name = "RESID" if objective == "score" else "DDQN"
+    ddqn_rows, score_rows, illa_rows, olla_rows = [], [], [], []
     for eval_seed in eval_seeds:
+        print(f"--- seed {eval_seed} ---")
+        if objective == "score":
+            agent.use_residual = False
+            seed_phy(eval_seed)
+            score_m = run_episode(env, agent, seed=eval_seed, train=False, greedy=True)
+            score_rows.append(score_m)
+            print_row("SCORE", score_m, bler_target)
+            agent.use_residual = True
+            agent.n_greedy = 0
+            agent.n_flip = 0
         seed_phy(eval_seed)
         ddqn_m = run_episode(env, agent, seed=eval_seed, train=False, greedy=True)
         seed_phy(eval_seed)
@@ -322,8 +430,13 @@ def main():
         ddqn_rows.append(ddqn_m)
         illa_rows.append(illa_m)
         olla_rows.append(olla_m)
-        print(f"--- seed {eval_seed} ---")
-        print_row("DDQN", ddqn_m, bler_target)
+        print_row(learner_name, ddqn_m, bler_target)
+        if objective == "score" and agent.n_greedy:
+            print(
+                f"  residual flips the table argmax on "
+                f"{agent.n_flip}/{agent.n_greedy} greedy decisions "
+                f"({agent.n_flip / agent.n_greedy:.3f})"
+            )
         print_row("ILLA", illa_m, bler_target)
         print_row("OLLA", olla_m, bler_target)
 
@@ -331,7 +444,10 @@ def main():
     ddqn_agg = aggregate_metrics(ddqn_rows)
     illa_agg = aggregate_metrics(illa_rows)
     olla_agg = aggregate_metrics(olla_rows)
-    print_mean_row("DDQN", ddqn_agg, bler_target)
+    score_agg = aggregate_metrics(score_rows) if score_rows else None
+    if score_agg is not None:
+        print_mean_row("SCORE", score_agg, bler_target)
+    print_mean_row(learner_name, ddqn_agg, bler_target)
     print_mean_row("ILLA", illa_agg, bler_target)
     print_mean_row("OLLA", olla_agg, bler_target)
 
@@ -354,31 +470,62 @@ def main():
     print(f"Saved eval summary -> {eval_path}")
 
     md_path = out_dir / f"ddqn_eval_table_seed{seed}.md"
-    lines = [
-        f"# DDQN eval vs ILLA / OLLA (train seed={seed}, {episodes} ep)",
-        "",
-        "| seed | DDQN ret | ILLA ret | OLLA ret | DDQN BLER | ILLA BLER | OLLA BLER | DDQN MCS | ILLA MCS | OLLA MCS | DDQN drops | ILLA drops | OLLA drops |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    ]
-    for i, s in enumerate(eval_seeds):
-        d, a, o = ddqn_rows[i], illa_rows[i], olla_rows[i]
-        lines.append(
-            f"| {s} | {d['return']:.1f} | {a['return']:.1f} | {o['return']:.1f} | "
-            f"{d['first_tx_bler']:.3f} | {a['first_tx_bler']:.3f} | {o['first_tx_bler']:.3f} | "
-            f"{d['mean_mcs']:.1f} | {a['mean_mcs']:.1f} | {o['mean_mcs']:.1f} | "
-            f"{d['drops']:.1f} | {a['drops']:.1f} | {o['drops']:.1f} |"
-        )
-    lines += [
-        "",
-        f"**mean±std return** DDQN {ddqn_agg['return_mean']:.1f}±{ddqn_agg['return_std']:.1f} · "
-        f"ILLA {illa_agg['return_mean']:.1f}±{illa_agg['return_std']:.1f} · "
-        f"OLLA {olla_agg['return_mean']:.1f}±{olla_agg['return_std']:.1f}",
-        "",
-        f"**mean 1st-tx BLER** DDQN {ddqn_agg['first_tx_bler_mean']:.3f} · "
-        f"ILLA {illa_agg['first_tx_bler_mean']:.3f} · "
-        f"OLLA {olla_agg['first_tx_bler_mean']:.3f}",
-        "",
-    ]
+    if score_agg is None:
+        lines = [
+            f"# DDQN eval vs ILLA / OLLA (train seed={seed}, {episodes} ep)",
+            "",
+            "| seed | DDQN ret | ILLA ret | OLLA ret | DDQN BLER | ILLA BLER | OLLA BLER | DDQN MCS | ILLA MCS | OLLA MCS | DDQN drops | ILLA drops | OLLA drops |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for i, s in enumerate(eval_seeds):
+            d, a, o = ddqn_rows[i], illa_rows[i], olla_rows[i]
+            lines.append(
+                f"| {s} | {d['return']:.1f} | {a['return']:.1f} | {o['return']:.1f} | "
+                f"{d['first_tx_bler']:.3f} | {a['first_tx_bler']:.3f} | {o['first_tx_bler']:.3f} | "
+                f"{d['mean_mcs']:.1f} | {a['mean_mcs']:.1f} | {o['mean_mcs']:.1f} | "
+                f"{d['drops']:.1f} | {a['drops']:.1f} | {o['drops']:.1f} |"
+            )
+        lines += [
+            "",
+            f"**mean±std return** DDQN {ddqn_agg['return_mean']:.1f}±{ddqn_agg['return_std']:.1f} · "
+            f"ILLA {illa_agg['return_mean']:.1f}±{illa_agg['return_std']:.1f} · "
+            f"OLLA {olla_agg['return_mean']:.1f}±{olla_agg['return_std']:.1f}",
+            "",
+            f"**mean 1st-tx BLER** DDQN {ddqn_agg['first_tx_bler_mean']:.3f} · "
+            f"ILLA {illa_agg['first_tx_bler_mean']:.3f} · "
+            f"OLLA {olla_agg['first_tx_bler_mean']:.3f}",
+            "",
+        ]
+    else:
+        lines = [
+            f"# Score table ± residual vs ILLA / OLLA (train seed={seed}, {episodes} ep)",
+            "",
+            "Queue feature is bits / max TBS. The table score is the action value. "
+            f"The residual is squashed to ±{args.residual_limit:g} and is not bootstrapped.",
+            "",
+            "| seed | SCORE ret | RESID ret | ILLA ret | OLLA ret | SCORE MCS | RESID MCS | OLLA MCS | SCORE BLER | RESID BLER | OLLA BLER |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for i, s in enumerate(eval_seeds):
+            sc, d, o = score_rows[i], ddqn_rows[i], olla_rows[i]
+            lines.append(
+                f"| {s} | {sc['return']:.1f} | {d['return']:.1f} | {illa_rows[i]['return']:.1f} | {o['return']:.1f} | "
+                f"{sc['mean_mcs']:.1f} | {d['mean_mcs']:.1f} | {o['mean_mcs']:.1f} | "
+                f"{sc['first_tx_bler']:.3f} | {d['first_tx_bler']:.3f} | {o['first_tx_bler']:.3f} |"
+            )
+        lines += [
+            "",
+            f"**mean±std return** SCORE {score_agg['return_mean']:.1f}±{score_agg['return_std']:.1f} · "
+            f"RESID {ddqn_agg['return_mean']:.1f}±{ddqn_agg['return_std']:.1f} · "
+            f"ILLA {illa_agg['return_mean']:.1f}±{illa_agg['return_std']:.1f} · "
+            f"OLLA {olla_agg['return_mean']:.1f}±{olla_agg['return_std']:.1f}",
+            "",
+            "one-step MCS map at nack 0:",
+            "",
+        ]
+        for q_bits in (400, 800, 2000):
+            lines.append(f"- queue {q_bits}: `{agent.mcs_map(q_bits)}`")
+        lines.append("")
     md_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"Saved eval table -> {md_path}")
     print("Done.")

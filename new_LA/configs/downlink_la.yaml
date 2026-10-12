@@ -58,6 +58,8 @@ arrival_bits_min: 300
 arrival_bits_max: 500
 queue_capacity: 15000
 overflow_penalty: 0.0
+# 신경망 상태의 큐 눈금. capacity는 비트/15000, tbs는 비트/최대 TBS(1688).
+queue_feat: tbs
 
 # run_la_sim 평가 시드. null이면 [seed]만
 eval_seeds: [0, 1, 2, 3, 4]
@@ -77,7 +79,7 @@ ddqn:
   hidden: 256
   buffer_size: 100000
   batch_size: 64
-  gamma: 0.99             # 슬롯당 할인. 백업은 gamma ** (그 TB가 쓴 슬롯 수)
+  gamma: 0.7              # 슬롯당 할인. 백업은 gamma ** (그 TB가 쓴 슬롯 수). 0.5/0/0.99보다 평가 반환이 높았다.
   # rate: 학습 보상 r - rho * tau, rho는 에피소드 슬롯당 처리율의 EMA. discount: 보상 r 그대로
   objective: rate
   rho_ema: 0.1

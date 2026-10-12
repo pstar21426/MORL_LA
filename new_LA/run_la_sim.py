@@ -198,17 +198,6 @@ def _flush_xlim(ax, x_max):
     ax.margins(x=0)
 
 
-def _tb_starts(slots_per_tb, total_slots):
-    starts = []
-    t = 0
-    for ns in slots_per_tb:
-        if t >= total_slots:
-            break
-        starts.append(t)
-        t += max(int(ns), 1)
-    return np.asarray(starts, dtype=int)
-
-
 def _running_mean(x):
     x = np.asarray(x, dtype=np.float64)
     if len(x) == 0:
