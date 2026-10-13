@@ -1,0 +1,73 @@
+num_slots: 1000
+seed: 0
+
+bler_target: 0.1
+mcs_table_index: 1
+mcs_category: 1
+num_allocated_re: 300
+
+sinr_mean_db: 10.0
+sinr_ar_rho: 0.95
+sinr_innov_std_db: 2.5
+sinr_min_db: -5.0
+sinr_max_db: 30.0
+sinr_mean_range_db: null
+sinr_mean_change_prob: 0.0
+sinr_ar_order: 1
+sinr_ar_phi1: null
+sinr_ar_phi2: 0.0
+
+cqi_noise_std_db: 1.5
+cqi_bias_db: 3.0
+cqi_bias_range_db: null
+decoding_evm_db: null
+burst_atten_db: 8.0
+burst_mean_on_slots: 20
+burst_mean_off_slots: 80
+cqi_delay_slots: 3
+cqi_bler_target: 0.1
+ack_delay_slots: 0
+olla_step_up_db: 0.1
+
+harq_max_retx: 3
+harq_retx_gap_slots: 3
+drop_penalty: 0.0
+
+state_num_lags: 3
+
+arrival_bits_min: 300
+arrival_bits_max: 500
+queue_capacity: 15000
+overflow_penalty: 0.0
+queue_feat: tbs
+
+eval_seeds: [205, 206, 207]
+collect_epsilons: [0.0]
+
+out_dir: outputs
+
+train:
+  episodes: 120
+  log_every: 20
+  eval_seeds: [205, 206, 207]
+
+uq_dqn:
+  hidden: 256
+  buffer_size: 100000
+  batch_size: 64
+  gamma: 0.7
+  objective: rate
+  rho_ema: 0.1
+  lr: 0.001
+  target_sync: 200
+  epsilon_start: 1.0
+  epsilon_end: 0.01
+  epsilon_decay_steps: 30000
+  double_q: true
+  evi_reg: 0.1
+  evi_loss_weight: 1.0
+
+# Charpentier et al. ensemble DQN. K independent Gaussian Q-networks.
+ensemble:
+  n_models: 5
+  hidden: 256
