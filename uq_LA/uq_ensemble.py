@@ -92,6 +92,10 @@ class EnsembleDQNAgent:
 
         self.buffer = ReplayBuffer(buffer_size)
         self.cqi_visits = np.zeros(16, dtype=np.int64)
+        # epsilon: mean-mu argmax with epsilon-greedy.
+        # alea: y ~ N(mean mu, (mean sigma)^2), then argmax. Paper sampling-aleatoric.
+        # epist: one member, then argmax of that member's mu. Paper sampling-epistemic.
+        self.action_mode = "epsilon"
 
     @property
     def epsilon(self) -> float:
@@ -127,11 +131,34 @@ class EnsembleDQNAgent:
         u_epist = float((mu_k[:, action] - mean_mu[action]).pow(2).mean().item())
         return float(mean_mu[action].item()), u_alea, u_epist
 
+    def _forward_all(self, state: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
+        s = torch.from_numpy(np.asarray(state, dtype=np.float32)).unsqueeze(0).to(self.device)
+        mus, sigs = [], []
+        with torch.no_grad():
+            for net in self.nets:
+                mu, log_std = net(s)
+                mus.append(mu.squeeze(0))
+                sigs.append(log_std.squeeze(0).exp())
+        return torch.stack(mus, dim=0), torch.stack(sigs, dim=0)
+
     def select_action(self, state: np.ndarray, *, greedy: bool = False) -> int:
-        if not greedy and np.random.random() < self.epsilon:
+        if greedy or self.action_mode == "mean":
+            return int(self._mean_mu(state).argmax().item())
+        if self.action_mode == "alea":
+            mu_k, sig_k = self._forward_all(state)
+            mu = mu_k.mean(dim=0)
+            sig = sig_k.mean(dim=0)
+            y = mu + sig * torch.randn_like(mu)
+            return int(y.argmax().item())
+        if self.action_mode == "epist":
+            k = int(np.random.randint(0, self.n_models))
+            s = torch.from_numpy(np.asarray(state, dtype=np.float32)).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                mu, _ = self.nets[k](s)
+            return int(mu.squeeze(0).argmax().item())
+        if np.random.random() < self.epsilon:
             return int(np.random.randint(0, self.n_actions))
-        q = self._mean_mu(state)
-        return int(q.argmax().item())
+        return int(self._mean_mu(state).argmax().item())
 
     def push(self, tr: Transition) -> None:
         self.buffer.push(tr)
