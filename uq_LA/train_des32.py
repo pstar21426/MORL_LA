@@ -45,21 +45,21 @@ def make_agent(env, cfg, seed):
     )
 
 
-def train_one(env, cfg, mode, seed, rho_ema):
+def train_one(env, cfg, mode, seed, rho_ema, episodes, probe_every):
     np.random.seed(seed)
     torch.manual_seed(seed)
     agent = make_agent(env, cfg, seed)
     agent.action_mode = mode
     log = {k: [] for k in ("episode", "train_return", "greedy_return", "rho")}
-    print(f"\n=== {mode} {EPISODES} ep ===", flush=True)
-    for ep in range(EPISODES):
+    print(f"\n=== {mode} seed {seed} {episodes} ep ===", flush=True)
+    for ep in range(episodes):
         m, _ = rollout_metrics(env, agent, seed=seed + ep, train=True)
         rate = m["return_per_slot"]
         agent.rho = rate if ep == 0 else (1.0 - rho_ema) * agent.rho + rho_ema * rate
         log["episode"].append(ep + 1)
         log["train_return"].append(m["ret"])
         greedy = np.nan
-        if (ep + 1) % PROBE_EVERY == 0 or ep + 1 == EPISODES:
+        if (ep + 1) % probe_every == 0 or ep + 1 == episodes:
             seed_phy(PROBE_SEED)
             g, _ = rollout_metrics(env, agent, seed=PROBE_SEED, train=False, greedy=True)
             greedy = g["ret"]
@@ -95,7 +95,7 @@ def eval_greedy(env, agent, olla, seeds):
     return np.asarray(rows), np.asarray(olla_rows)
 
 
-def plot(logs, evals, olla_mean, path):
+def plot(logs, evals, olla_mean, path, gamma):
     fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.6))
     colors = {"alea": "C1", "epist": "C0"}
     for mode, log in logs.items():
@@ -118,7 +118,10 @@ def plot(logs, evals, olla_mean, path):
     axes[1].set_xlabel("episode")
     axes[1].legend(fontsize=8)
     axes[1].grid(True, alpha=0.3)
-    fig.suptitle("Desideratum 3.2: sampling-aleatoric vs sampling-epistemic", fontsize=12)
+    fig.suptitle(
+        f"Desideratum 3.2, gamma={gamma:g}: sampling-aleatoric vs sampling-epistemic",
+        fontsize=12,
+    )
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -141,30 +144,39 @@ def plot(logs, evals, olla_mean, path):
 
 
 def main():
+    import argparse
+
+    p = argparse.ArgumentParser()
+    p.add_argument("--gamma", type=float, default=None)
+    p.add_argument("--episodes", type=int, default=EPISODES)
+    p.add_argument("--train-seeds", type=int, nargs="+", default=None)
+    p.add_argument("--eval-seeds", type=int, nargs="+", default=None)
+    p.add_argument("--probe-every", type=int, default=PROBE_EVERY)
+    p.add_argument("--modes", nargs="+", default=list(MODES))
+    p.add_argument("--out-dir", type=Path, default=None)
+    args = p.parse_args()
+
     with (HERE / "configs" / "downlink_la.yaml").open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    seed = int(cfg.get("seed", 0))
+    if args.gamma is not None:
+        cfg.setdefault("uq_dqn", {})["gamma"] = float(args.gamma)
+    gamma = float((cfg.get("uq_dqn") or {}).get("gamma", 0.7))
+    episodes = int(args.episodes)
+    modes = tuple(args.modes)
+    train_seeds = [int(s) for s in (args.train_seeds or [cfg.get("seed", 0)])]
+    eval_seeds = [int(s) for s in (args.eval_seeds or EVAL_SEEDS)]
     rho_ema = float((cfg.get("uq_dqn") or {}).get("rho_ema", 0.1))
     phy = PHYAbstraction()
     env = DownlinkLAEnv.from_config(cfg, phy_abs=phy)
-    out = HERE / "outputs" / "des32"
+    out = args.out_dir or (HERE / "outputs" / "des32")
+    if not out.is_absolute():
+        out = HERE / out
     out.mkdir(parents=True, exist_ok=True)
-
-    logs = {}
-    agents = {}
-    for mode in MODES:
-        agents[mode], logs[mode] = train_one(env, cfg, mode, seed, rho_ema)
-        torch.save(
-            {
-                **agents[mode].state_dict(),
-                "action_mode": mode,
-                "gamma": agents[mode].gamma,
-                "rho": agents[mode].rho,
-                "episodes": EPISODES,
-            },
-            out / f"{mode}.pt",
-        )
-        np.savez(out / f"{mode}_log.npz", **{k: np.asarray(v) for k, v in logs[mode].items()})
+    print(
+        f"gamma={gamma} episodes={episodes} train_seeds={train_seeds} "
+        f"eval_seeds={eval_seeds} modes={modes} out={out}",
+        flush=True,
+    )
 
     olla = make_baseline_policy(
         "olla",
@@ -172,38 +184,130 @@ def main():
         bler_target=float(cfg["bler_target"]),
         olla_step_up_db=cfg.get("olla_step_up_db"),
     )
-    evals = {}
-    for mode in MODES:
-        print(f"\n=== greedy eval {mode} ===", flush=True)
-        evals[mode] = eval_greedy(env, agents[mode], olla, EVAL_SEEDS)
-    olla_mean = float(evals["alea"][1].mean())
-    plot(logs, evals, olla_mean, out / "curves.png")
+    by_seed = {}
+    for train_seed in train_seeds:
+        logs = {}
+        agents = {}
+        for mode in modes:
+            agents[mode], logs[mode] = train_one(
+                env, cfg, mode, train_seed, rho_ema, episodes, int(args.probe_every)
+            )
+            torch.save(
+                {
+                    **agents[mode].state_dict(),
+                    "action_mode": mode,
+                    "gamma": agents[mode].gamma,
+                    "rho": agents[mode].rho,
+                    "episodes": episodes,
+                    "train_seed": train_seed,
+                },
+                out / f"{mode}_seed{train_seed}.pt",
+            )
+            np.savez(
+                out / f"{mode}_seed{train_seed}_log.npz",
+                **{k: np.asarray(v) for k, v in logs[mode].items()},
+            )
+        evals = {}
+        for mode in modes:
+            print(f"\n=== greedy eval {mode} train_seed {train_seed} ===", flush=True)
+            evals[mode] = eval_greedy(env, agents[mode], olla, eval_seeds)
+        by_seed[train_seed] = {"logs": logs, "evals": evals}
+        del agents
 
-    def paired(mode):
-        d = evals[mode][0] - evals[mode][1]
-        se = float(d.std(ddof=1) / np.sqrt(len(d))) if len(d) > 1 else float("nan")
-        return float(d.mean()), se
+    def mean_se(vals):
+        vals = np.asarray(vals, dtype=np.float64)
+        se = float(vals.std(ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else float("nan")
+        return float(vals.mean()), se
 
-    a_diff, a_se = paired("alea")
-    e_diff, e_se = paired("epist")
+    if set(modes) != {"alea", "epist"}:
+        lines = [
+            f"# epsilon-greedy ensemble. gamma={gamma}, {episodes} episodes.",
+            f"Train seeds {train_seeds}. Eval seeds {eval_seeds}.",
+            "Action rule: epsilon-greedy on the mean mu. Same ensemble and NLL as alea/epist.",
+            "",
+            "| train seed | mode | last 10 train return | greedy mean |",
+            "| --- | --- | ---: | ---: |",
+        ]
+        for train_seed, pack in by_seed.items():
+            for mode in modes:
+                last = float(np.mean(pack["logs"][mode]["train_return"][-10:]))
+                gmean = float(pack["evals"][mode][0].mean())
+                lines.append(f"| {train_seed} | {mode} | {last:.1f} | {gmean:.1f} |")
+        text = "\n".join(lines) + "\n"
+        (out / "train_summary.md").write_text(text, encoding="utf-8")
+        greedy = {
+            str(train_seed): {
+                mode: float(pack["evals"][mode][0].mean()) for mode in modes
+            }
+            for train_seed, pack in by_seed.items()
+        }
+        (out / "greedy_means.json").write_text(
+            __import__("json").dumps(greedy), encoding="utf-8"
+        )
+        print(text, flush=True)
+        print(f"wrote {out / 'train_summary.md'}", flush=True)
+        return
+
+    last_gap, greedy_gap = [], []
     lines = [
-        "# Desideratum 3.2. Same ensemble, 80 episodes, seeds 0-79.",
+        f"# Desideratum 3.2. gamma={gamma}, {episodes} episodes.",
+        f"Train seeds {train_seeds}. Each seed uses env seeds "
+        f"[seed, seed+{episodes}).",
         "alea: one N(mean mu, (mean sigma)^2) sample per action, then argmax.",
         "epist: one ensemble member, then argmax of its mu.",
-        "Greedy eval uses the mean mu. Seeds 205-207.",
+        f"Greedy eval uses the mean mu on seeds {eval_seeds}.",
         "",
-        "| | train return last 10 | greedy mean | OLLA | greedy-OLLA | SE |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "| train seed | alea last10 | epist last10 | epist-alea | alea greedy | epist greedy | greedy epist-alea |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for mode, diff, se in (("alea", a_diff, a_se), ("epist", e_diff, e_se)):
-        last = float(np.mean(logs[mode]["train_return"][-10:]))
-        gmean = float(evals[mode][0].mean())
+    for train_seed, pack in by_seed.items():
+        last = {
+            mode: float(np.mean(pack["logs"][mode]["train_return"][-10:])) for mode in modes
+        }
+        gmean = {mode: float(pack["evals"][mode][0].mean()) for mode in modes}
+        last_gap.append(last["epist"] - last["alea"])
+        greedy_gap.append(gmean["epist"] - gmean["alea"])
         lines.append(
-            f"| {mode} | {last:.1f} | {gmean:.1f} | {olla_mean:.1f} | {diff:+.1f} | {se:.1f} |"
+            f"| {train_seed} | {last['alea']:.1f} | {last['epist']:.1f} | "
+            f"{last_gap[-1]:+.1f} | {gmean['alea']:.1f} | {gmean['epist']:.1f} | "
+            f"{greedy_gap[-1]:+.1f} |"
         )
+    lg_mean, lg_se = mean_se(last_gap)
+    gg_mean, gg_se = mean_se(greedy_gap)
+    lines += [
+        "",
+        f"**epist - alea, last 10 training episodes:** {lg_mean:+.1f} ± {lg_se:.1f} "
+        f"(SE over {len(train_seeds)} train seeds)",
+        "",
+        f"**epist - alea, greedy mean on eval seeds:** {gg_mean:+.1f} ± {gg_se:.1f} "
+        f"(SE over {len(train_seeds)} train seeds)",
+        "",
+    ]
     text = "\n".join(lines) + "\n"
     (out / "summary.md").write_text(text, encoding="utf-8")
     print(text, flush=True)
+
+    fig, ax = plt.subplots(figsize=(7.2, 3.8))
+    colors = {"alea": "C1", "epist": "C0"}
+    for mode in MODES:
+        curves = [
+            np.asarray(by_seed[s]["logs"][mode]["train_return"], dtype=np.float64)
+            for s in train_seeds
+        ]
+        stack = np.stack(curves)
+        mean = stack.mean(axis=0)
+        ep = np.arange(1, episodes + 1)
+        for row in stack:
+            ax.plot(ep, row, color=colors[mode], alpha=0.25, lw=0.8)
+        ax.plot(ep, mean, color=colors[mode], lw=1.8, label=f"{mode} mean")
+    ax.set_xlabel("episode")
+    ax.set_ylabel("training return")
+    ax.set_title(f"gamma={gamma:g}, train seeds {train_seeds}")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out / "curves.png", dpi=150)
+    plt.close(fig)
     print(f"wrote {out}", flush=True)
 
 
